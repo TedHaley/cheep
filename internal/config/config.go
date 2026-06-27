@@ -1,60 +1,118 @@
-// Package config loads settings from environment variables with sensible
-// defaults: Claude (Sonnet) as the orchestrator, a local Qwen served by Ollama
-// as the executor. Override any of these via the CHEEP_* env vars.
+// Package config is cheep's on-disk configuration: which model orchestrates,
+// and which executor endpoints do the work.
+//
+// Executors are described purely by endpoint + access key — cheep does not care
+// (or ask) how the model behind an endpoint is served. The model each executor
+// runs is detected from the endpoint and recorded so the orchestrator can route
+// work to the most suitable one.
 package config
 
 import (
+	"encoding/json"
 	"os"
-	"strconv"
+	"path/filepath"
 )
 
-type AgentConfig struct {
-	Provider    string
-	Model       string
-	BaseURL     string
-	APIKey      string
-	MaxTurns    int
-	TokenBudget int // stop the loop if cumulative input tokens exceed this (0 = unlimited)
+type Orchestrator struct {
+	Provider string `json:"provider"` // currently always "anthropic"
+	Model    string `json:"model"`
+	APIKey   string `json:"api_key,omitempty"`
+	MaxTurns int    `json:"max_turns,omitempty"`
 }
 
-type Settings struct {
-	Orchestrator AgentConfig
-	Executor     AgentConfig
-	Workdir      string
+type Executor struct {
+	Name        string `json:"name"`
+	BaseURL     string `json:"base_url"`
+	APIKey      string `json:"api_key,omitempty"`
+	Model       string `json:"model,omitempty"` // detected at setup time
+	MaxTurns    int    `json:"max_turns,omitempty"`
+	TokenBudget int    `json:"token_budget,omitempty"`
 }
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+type Config struct {
+	Orchestrator Orchestrator `json:"orchestrator"`
+	Executors    []Executor   `json:"executors"`
+}
+
+// Dir is the cheep config directory (created lazily on Save).
+func Dir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
 	}
-	return def
+	return filepath.Join(base, "cheep"), nil
 }
 
-func envInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
+func Path() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "config.json"), nil
+}
+
+func Exists() bool {
+	p, err := Path()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(p)
+	return err == nil
+}
+
+func Load() (Config, error) {
+	var c Config
+	p, err := Path()
+	if err != nil {
+		return c, err
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return c, err
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return c, err
+	}
+	c.ApplyDefaults()
+	return c, nil
+}
+
+// ApplyDefaults fills in zero values and falls back to the ANTHROPIC_API_KEY env
+// var when the orchestrator key was left blank in the file.
+func (c *Config) ApplyDefaults() {
+	if c.Orchestrator.Provider == "" {
+		c.Orchestrator.Provider = "anthropic"
+	}
+	if c.Orchestrator.Model == "" {
+		c.Orchestrator.Model = "claude-sonnet-4-6"
+	}
+	if c.Orchestrator.MaxTurns == 0 {
+		c.Orchestrator.MaxTurns = 30
+	}
+	if c.Orchestrator.APIKey == "" {
+		c.Orchestrator.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	for i := range c.Executors {
+		if c.Executors[i].MaxTurns == 0 {
+			c.Executors[i].MaxTurns = 20
+		}
+		if c.Executors[i].TokenBudget == 0 {
+			c.Executors[i].TokenBudget = 100000
 		}
 	}
-	return def
 }
 
-func FromEnv(workdir string) Settings {
-	return Settings{
-		Orchestrator: AgentConfig{
-			Provider: "anthropic",
-			Model:    envOr("CHEEP_ORCHESTRATOR_MODEL", "claude-sonnet-4-6"),
-			APIKey:   os.Getenv("ANTHROPIC_API_KEY"),
-			MaxTurns: envInt("CHEEP_ORCHESTRATOR_MAX_TURNS", 30),
-		},
-		Executor: AgentConfig{
-			Provider:    "openai",
-			Model:       envOr("CHEEP_EXECUTOR_MODEL", "qwen2.5-coder"),
-			BaseURL:     envOr("CHEEP_EXECUTOR_BASE_URL", "http://localhost:11434/v1"),
-			APIKey:      envOr("CHEEP_EXECUTOR_API_KEY", "ollama"),
-			MaxTurns:    envInt("CHEEP_EXECUTOR_MAX_TURNS", 20),
-			TokenBudget: envInt("CHEEP_EXECUTOR_TOKEN_BUDGET", 100000),
-		},
-		Workdir: workdir,
+func Save(c Config) error {
+	d, err := Dir()
+	if err != nil {
+		return err
 	}
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(d, "config.json"), b, 0o600)
 }

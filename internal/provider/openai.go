@@ -12,8 +12,66 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 )
 
-// OpenAI talks to any OpenAI-compatible chat-completions endpoint over raw HTTP:
-// Ollama, vLLM, llama.cpp, etc.
+// DiscoverModels probes an endpoint for its model list. The caller passes the
+// access details only (endpoint + key); cheep figures out the rest. It tries the
+// endpoint as-given and with a "/v1" suffix, and returns the base that actually
+// responded plus the model IDs it serves.
+func DiscoverModels(rawBase, apiKey string) (resolvedBase string, models []string, err error) {
+	rawBase = strings.TrimRight(rawBase, "/")
+	candidates := []string{rawBase}
+	if !strings.HasSuffix(rawBase, "/v1") {
+		candidates = append(candidates, rawBase+"/v1")
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	var lastErr error
+	for _, base := range candidates {
+		req, reqErr := http.NewRequest("GET", base+"/models", nil)
+		if reqErr != nil {
+			lastErr = reqErr
+			continue
+		}
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			lastErr = doErr
+			continue
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("%s/models -> HTTP %d", base, resp.StatusCode)
+			continue
+		}
+		var parsed struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if jErr := json.Unmarshal(data, &parsed); jErr != nil {
+			lastErr = jErr
+			continue
+		}
+		var ids []string
+		for _, m := range parsed.Data {
+			ids = append(ids, m.ID)
+		}
+		if len(ids) == 0 {
+			// Some servers return 200 with an error body on the wrong path;
+			// don't accept an empty list, keep probing other candidates.
+			lastErr = fmt.Errorf("%s/models returned no models", base)
+			continue
+		}
+		return base, ids, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no models endpoint responded")
+	}
+	return "", nil, lastErr
+}
+
+// OpenAI talks to any OpenAI-compatible chat-completions endpoint over raw HTTP.
 type OpenAI struct {
 	APIKey    string
 	BaseURL   string
