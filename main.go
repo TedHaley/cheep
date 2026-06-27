@@ -1,6 +1,6 @@
-// Command cheep is a Claude orchestrator that coordinates a fleet of cheaper
-// executor agents: it decomposes a task, delegates self-contained subtasks to
-// executors (in parallel), verifies their work, and recovers them when stuck.
+// Command cheep is an interactive multi-agent coding shell. A lead "orchestrator"
+// agent plans and verifies; optional "executor" agents do the work in parallel.
+// Any role can point at an Anthropic or OpenAI-compatible endpoint.
 package main
 
 import (
@@ -10,11 +10,14 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
+	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/provider"
+	"github.com/TedHaley/cheep/internal/worktree"
 )
 
 // version is stamped at build time by GoReleaser (-X main.version=...).
@@ -29,10 +32,18 @@ const (
 	cRed    = "\033[1;31m"
 )
 
+const bannerArt = `
+ ██████╗██╗  ██╗███████╗███████╗██████╗
+██╔════╝██║  ██║██╔════╝██╔════╝██╔══██╗
+██║     ███████║█████╗  █████╗  ██████╔╝
+██║     ██╔══██║██╔══╝  ██╔══╝  ██╔═══╝
+╚██████╗██║  ██║███████╗███████╗██║
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝`
+
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(1)
+		cmdChat()
+		return
 	}
 	switch os.Args[1] {
 	case "run":
@@ -53,16 +64,17 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`cheep — a Claude orchestrator that coordinates a fleet of cheaper executor agents.
+	fmt.Print(`cheep — an interactive multi-agent coding shell.
 
 Usage:
-  cheep run "<task>" [--workdir DIR]    decompose, delegate to executors, verify
-  cheep check                           ping the orchestrator and every executor
-  cheep config [show|path]              set up or inspect your agents
-  cheep version                         print the version
+  cheep                          start the interactive shell (default)
+  cheep run "<task>" [--workdir] run a single task non-interactively
+  cheep check                    ping the orchestrator and every executor
+  cheep config [show|path]       set up or inspect your agents
+  cheep version                  print the version
 
-On first use, cheep walks you through choosing an orchestrator and one or more
-executors. Configuration lives in a single JSON file (see "cheep config path").
+On first use, cheep walks you through choosing an orchestrator and, optionally,
+one or more executors. Configuration lives in a single JSON file (cheep config path).
 `)
 }
 
@@ -71,7 +83,6 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-// ensureConfig loads the config, running the first-time setup wizard if none exists.
 func ensureConfig() config.Config {
 	if !config.Exists() {
 		fmt.Println("No configuration found yet — let's set up your agents.")
@@ -87,6 +98,122 @@ func ensureConfig() config.Config {
 		fatal(fmt.Errorf("reading config: %w", err))
 	}
 	return c
+}
+
+// ---- interactive shell ----------------------------------------------------
+
+func cmdChat() {
+	cfg := ensureConfig()
+	workdir, _ := os.Getwd()
+	onEvent := printer()
+
+	makeSession := func() *agent.Session {
+		orch, err := orchestrator.Build(cfg, workdir, true, onEvent)
+		if err != nil {
+			fmt.Printf("%s%v%s\n", cYellow, err, cReset)
+			return nil
+		}
+		return orch.NewSession()
+	}
+
+	fmt.Printf("%s%s%s\n", cCyan, bannerArt, cReset)
+	printStatus(cfg, workdir)
+	fmt.Printf("%sType a task, or /help for commands. Ctrl-D or /exit to quit.%s\n", cDim, cReset)
+
+	session := makeSession()
+	in := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print("\n› ")
+		line, err := in.ReadString('\n')
+		if err != nil { // EOF / Ctrl-D
+			fmt.Println()
+			return
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "/") {
+			switch fields := strings.Fields(line); fields[0] {
+			case "/exit", "/quit", "/q":
+				return
+			case "/help", "/?":
+				fmt.Print(`commands:
+  /config    reconfigure agents (orchestrator + executors)
+  /status    show the current setup
+  /clear     start a fresh conversation
+  /help      this help
+  /exit      quit
+`)
+			case "/status":
+				printStatus(cfg, workdir)
+			case "/config":
+				if c, err := runWizard(); err != nil {
+					fmt.Printf("%sconfig: %v%s\n", cRed, err, cReset)
+				} else {
+					cfg = c
+					session = makeSession()
+					printStatus(cfg, workdir)
+				}
+			case "/clear":
+				session = makeSession()
+				fmt.Printf("%s(new conversation)%s\n", cDim, cReset)
+			default:
+				fmt.Printf("%sunknown command %q — try /help%s\n", cYellow, fields[0], cReset)
+			}
+			continue
+		}
+
+		if session == nil {
+			fmt.Printf("%snot configured yet — run /config%s\n", cYellow, cReset)
+			continue
+		}
+		r := session.Send(line)
+		fmt.Printf("%s[%s · %d turns · %d→%d tokens]%s\n",
+			cDim, r.Status, r.Turns, r.InputTokens, r.OutputTokens, cReset)
+	}
+}
+
+func printStatus(cfg config.Config, workdir string) {
+	lines := []string{
+		"cheep " + version,
+		"",
+		fmt.Sprintf("orchestrator  %s  [%s]", cfg.Orchestrator.Model, cfg.Orchestrator.Provider),
+	}
+	if len(cfg.Executors) == 0 {
+		lines = append(lines, "executors     (none — solo mode)")
+	} else {
+		for i, e := range cfg.Executors {
+			label := "executors"
+			if i > 0 {
+				label = ""
+			}
+			lines = append(lines, fmt.Sprintf("%-13s %s → %s", label, e.Name, e.Model))
+		}
+	}
+	git := ""
+	if worktree.IsRepo(workdir) {
+		git = "  (git: worktree isolation on)"
+	}
+	lines = append(lines, "", "workspace     "+workdir+git)
+	fmt.Println(boxed(lines))
+}
+
+func boxed(lines []string) string {
+	w := 0
+	for _, l := range lines {
+		if n := utf8.RuneCountInString(l); n > w {
+			w = n
+		}
+	}
+	var b strings.Builder
+	b.WriteString("┌" + strings.Repeat("─", w+2) + "┐\n")
+	for _, l := range lines {
+		b.WriteString("│ " + l + strings.Repeat(" ", w-utf8.RuneCountInString(l)) + " │\n")
+	}
+	b.WriteString("└" + strings.Repeat("─", w+2) + "┘")
+	return b.String()
 }
 
 // ---- setup wizard ---------------------------------------------------------
@@ -109,59 +236,72 @@ func runWizard() (config.Config, error) {
 	}
 
 	var c config.Config
-	fmt.Println("── Orchestrator ──  the smart model that plans, delegates and verifies")
-	c.Orchestrator.Provider = "anthropic"
-	c.Orchestrator.Model = ask("Orchestrator model", "claude-sonnet-4-6")
-	keyPrompt := "Anthropic API key"
-	if os.Getenv("ANTHROPIC_API_KEY") != "" {
-		keyPrompt += " (blank = use ANTHROPIC_API_KEY)"
+	fmt.Println("── Orchestrator ──  the lead agent that plans, delegates and verifies")
+	endpoint := ask("Orchestrator endpoint URL (blank = Anthropic / Claude)", "")
+	if endpoint == "" || strings.Contains(endpoint, "anthropic") {
+		c.Orchestrator.Provider = "anthropic"
+		c.Orchestrator.Model = ask("Model", "claude-sonnet-4-6")
+		kp := "API key"
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			kp += " (blank = ANTHROPIC_API_KEY)"
+		}
+		c.Orchestrator.APIKey = ask(kp, "")
+	} else {
+		key := ask("Access key (blank if none)", "")
+		base, model := detectModel(endpoint, key, ask)
+		c.Orchestrator.Provider = "openai"
+		c.Orchestrator.Endpoint = base
+		c.Orchestrator.Model = model
+		c.Orchestrator.APIKey = key
 	}
-	c.Orchestrator.APIKey = ask(keyPrompt, "")
 
 	fmt.Println()
-	fmt.Println("── Executors ──  the cheap workers; give each an endpoint and access key")
-	for {
-		fmt.Println()
-		name := ask("Executor name", fmt.Sprintf("executor-%d", len(c.Executors)+1))
-		endpoint := ask("Endpoint URL", "")
-		for endpoint == "" {
-			fmt.Println("  an endpoint is required.")
-			endpoint = ask("Endpoint URL", "")
+	if strings.HasPrefix(strings.ToLower(ask("Add separate executor agents? (y/N)", "n")), "y") {
+		fmt.Println("── Executors ──  cheap workers the orchestrator delegates to")
+		for {
+			fmt.Println()
+			name := ask("Executor name", fmt.Sprintf("executor-%d", len(c.Executors)+1))
+			ep := ask("Endpoint URL", "")
+			for ep == "" {
+				fmt.Println("  an endpoint is required.")
+				ep = ask("Endpoint URL", "")
+			}
+			key := ask("Access key (blank if none)", "")
+			base, model := detectModel(ep, key, ask)
+			c.Executors = append(c.Executors, config.Agent{
+				Name: name, Provider: "openai", Endpoint: base, APIKey: key, Model: model,
+			})
+			if !strings.HasPrefix(strings.ToLower(ask("Add another executor? (y/N)", "n")), "y") {
+				break
+			}
 		}
-		key := ask("Access key (blank if none)", "")
-
-		fmt.Print("  detecting available model… ")
-		base, models, err := provider.DiscoverModels(endpoint, key)
-		model := ""
-		switch {
-		case err != nil || len(models) == 0:
-			fmt.Printf("%scould not detect%s (%s)\n", cYellow, cReset, errText(err))
-			model = ask("  Model id to use", "")
-			base = endpoint
-		case len(models) == 1:
-			model = models[0]
-			fmt.Printf("%sfound %q%s\n", cGreen, model, cReset)
-		default:
-			fmt.Printf("%sfound: %s%s\n", cGreen, strings.Join(models, ", "), cReset)
-			model = ask("  Which model", models[0])
-		}
-
-		c.Executors = append(c.Executors, config.Executor{
-			Name: name, BaseURL: base, APIKey: key, Model: model,
-		})
-
-		if !strings.HasPrefix(strings.ToLower(ask("Add another executor? (y/N)", "n")), "y") {
-			break
-		}
+	} else {
+		fmt.Printf("%sSolo mode: the orchestrator will do everything itself.%s\n", cDim, cReset)
 	}
 
 	if err := config.Save(c); err != nil {
 		return c, err
 	}
-	p, _ := config.Path()
 	c.ApplyDefaults()
-	fmt.Printf("\n%s✓ Saved to %s%s\n\n", cGreen, p, cReset)
+	p, _ := config.Path()
+	fmt.Printf("\n%s✓ Saved to %s%s\n", cGreen, p, cReset)
 	return c, nil
+}
+
+func detectModel(endpoint, key string, ask func(string, string) string) (base, model string) {
+	fmt.Print("  detecting available model… ")
+	resolved, models, err := provider.DiscoverModels(endpoint, key)
+	switch {
+	case err != nil || len(models) == 0:
+		fmt.Printf("%scould not detect%s (%s)\n", cYellow, cReset, errText(err))
+		return endpoint, ask("  Model id to use", "")
+	case len(models) == 1:
+		fmt.Printf("%sfound %q%s\n", cGreen, models[0], cReset)
+		return resolved, models[0]
+	default:
+		fmt.Printf("%sfound: %s%s\n", cGreen, strings.Join(models, ", "), cReset)
+		return resolved, ask("  Which model", models[0])
+	}
 }
 
 func errText(err error) string {
@@ -194,33 +334,30 @@ func cmdConfig(argv []string) {
 		if err != nil {
 			fatal(err)
 		}
-		redact(&c)
-		fmt.Printf("Orchestrator: %s (%s)\n", c.Orchestrator.Model, c.Orchestrator.Provider)
+		fmt.Printf("Orchestrator: %s [%s]", c.Orchestrator.Model, c.Orchestrator.Provider)
+		if c.Orchestrator.Endpoint != "" {
+			fmt.Printf(" @ %s", c.Orchestrator.Endpoint)
+		}
+		fmt.Println()
+		if len(c.Executors) == 0 {
+			fmt.Println("Executors: (none — solo mode)")
+			return
+		}
 		fmt.Println("Executors:")
 		for _, e := range c.Executors {
-			fmt.Printf("  - %s  model=%s  endpoint=%s\n", e.Name, e.Model, e.BaseURL)
+			fmt.Printf("  - %s  model=%s  endpoint=%s\n", e.Name, e.Model, e.Endpoint)
 		}
 	default:
 		fatal(fmt.Errorf("unknown config subcommand %q (use show|path|edit)", sub))
 	}
 }
 
-func redact(c *config.Config) {
-	if c.Orchestrator.APIKey != "" {
-		c.Orchestrator.APIKey = "••••"
-	}
-	for i := range c.Executors {
-		if c.Executors[i].APIKey != "" {
-			c.Executors[i].APIKey = "••••"
-		}
-	}
-}
-
-// ---- run ------------------------------------------------------------------
+// ---- one-shot run ---------------------------------------------------------
 
 func cmdRun(argv []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	workdir := fs.String("workdir", ".", "workspace directory the agents operate in")
+	isolate := fs.Bool("isolate", true, "run each parallel subtask in its own git worktree (if workdir is a git repo)")
 	_ = fs.Parse(argv)
 
 	task := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -229,17 +366,14 @@ func cmdRun(argv []string) {
 	}
 
 	cfg := ensureConfig()
-	orch, err := orchestrator.Build(cfg, *workdir, printer())
+	orch, err := orchestrator.Build(cfg, *workdir, *isolate, printer())
 	if err != nil {
 		fatal(err)
 	}
-
 	fmt.Println("──────────── cheep ────────────")
 	r := orch.Run(task)
 	fmt.Println("──────────── done ────────────")
-	fmt.Printf("Status: %s\n", r.Status)
-	fmt.Printf("Orchestrator (%s) tokens: in=%d out=%d\n\n", cfg.Orchestrator.Model, r.InputTokens, r.OutputTokens)
-	fmt.Println(r.Output)
+	fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
 }
 
 // ---- check ----------------------------------------------------------------
@@ -247,25 +381,21 @@ func cmdRun(argv []string) {
 func cmdCheck() {
 	cfg := ensureConfig()
 
-	fmt.Printf("Orchestrator  %-22s ", cfg.Orchestrator.Model)
-	if cfg.Orchestrator.APIKey == "" {
+	fmt.Printf("Orchestrator  %-24s ", cfg.Orchestrator.Model)
+	if cfg.Orchestrator.Provider == "anthropic" && cfg.Orchestrator.APIKey == "" {
 		fmt.Printf("%sno API key (set ANTHROPIC_API_KEY or run `cheep config`)%s\n", cRed, cReset)
 	} else {
-		ap := provider.NewAnthropic(cfg.Orchestrator.APIKey, 16)
-		ping(ap, cfg.Orchestrator.Model)
+		ping(provider.For(cfg.Orchestrator.Provider, cfg.Orchestrator.Endpoint, cfg.Orchestrator.APIKey, 16),
+			cfg.Orchestrator.Model)
 	}
-
 	for _, e := range cfg.Executors {
-		label := fmt.Sprintf("%s (%s)", e.Name, e.Model)
-		fmt.Printf("Executor      %-22s ", label)
-		ep := provider.NewOpenAI(e.BaseURL, e.APIKey, 16)
-		ping(ep, e.Model)
+		fmt.Printf("Executor      %-24s ", fmt.Sprintf("%s (%s)", e.Name, e.Model))
+		ping(provider.For(e.Provider, e.Endpoint, e.APIKey, 16), e.Model)
 	}
 }
 
 func ping(p core.Provider, model string) {
-	_, err := p.Complete(model, "Reply with: ok", []core.Message{{Role: "user", Text: "ok"}}, nil)
-	if err != nil {
+	if _, err := p.Complete(model, "Reply with: ok", []core.Message{{Role: "user", Text: "ok"}}, nil); err != nil {
 		fmt.Printf("%sunreachable: %v%s\n", cRed, err, cReset)
 		return
 	}
@@ -280,7 +410,7 @@ func printer() core.EventFunc {
 		mu.Lock()
 		defer mu.Unlock()
 		color := cCyan
-		if e.Agent != "orchestrator" {
+		if e.Agent != "orchestrator" && e.Agent != "cheep" {
 			color = cGreen
 		}
 		switch e.Type {

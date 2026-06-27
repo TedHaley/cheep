@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/TedHaley/cheep/internal/core"
@@ -30,11 +31,19 @@ func truncate(s string) string {
 	return s
 }
 
-func resolve(workdir, path string) string {
+// confine resolves path within workdir and refuses anything that escapes it.
+// This is what makes worktree isolation real: an executor cannot read or write
+// outside the workspace it was given (absolute paths and ".." are rejected).
+func confine(workdir, path string) (string, error) {
 	if filepath.IsAbs(path) {
-		return path
+		return "", fmt.Errorf("absolute paths are not allowed; use a path relative to the workspace")
 	}
-	return filepath.Join(workdir, path)
+	full := filepath.Join(workdir, path)
+	rel, err := filepath.Rel(workdir, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the workspace", path)
+	}
+	return full, nil
 }
 
 func argStr(args map[string]any, key string) string {
@@ -51,7 +60,11 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 	}
 
 	readFile := func(args map[string]any) string {
-		b, err := os.ReadFile(resolve(workdir, argStr(args, "path")))
+		p, err := confine(workdir, argStr(args, "path"))
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		b, err := os.ReadFile(p)
 		if err != nil {
 			return "ERROR: " + err.Error()
 		}
@@ -59,11 +72,15 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 	}
 
 	listDir := func(args map[string]any) string {
-		p := argStr(args, "path")
-		if p == "" {
-			p = "."
+		rel := argStr(args, "path")
+		if rel == "" {
+			rel = "."
 		}
-		entries, err := os.ReadDir(resolve(workdir, p))
+		p, err := confine(workdir, rel)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
+		entries, err := os.ReadDir(p)
 		if err != nil {
 			return "ERROR: " + err.Error()
 		}
@@ -109,7 +126,10 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 
 	writeFile := func(args map[string]any) string {
 		rel := argStr(args, "path")
-		p := resolve(workdir, rel)
+		p, err := confine(workdir, rel)
+		if err != nil {
+			return "ERROR: " + err.Error()
+		}
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return "ERROR: " + err.Error()
 		}
