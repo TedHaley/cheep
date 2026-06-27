@@ -221,6 +221,7 @@ func redact(c *config.Config) {
 func cmdRun(argv []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	workdir := fs.String("workdir", ".", "workspace directory the agents operate in")
+	isolate := fs.Bool("isolate", true, "run each parallel subtask in its own git worktree (if workdir is a git repo)")
 	_ = fs.Parse(argv)
 
 	task := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -229,7 +230,7 @@ func cmdRun(argv []string) {
 	}
 
 	cfg := ensureConfig()
-	orch, err := orchestrator.Build(cfg, *workdir, printer())
+	orch, err := orchestrator.Build(cfg, *workdir, *isolate, printer())
 	if err != nil {
 		fatal(err)
 	}

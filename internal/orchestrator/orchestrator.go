@@ -19,6 +19,7 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tool"
+	"github.com/TedHaley/cheep/internal/worktree"
 )
 
 const executorSystem = `You are an executor agent: a focused, capable coding/execution worker.
@@ -57,13 +58,14 @@ type execRuntime struct {
 	provider core.Provider
 	maxTurns int
 	budget   int
-	workdir  string
 	onEvent  core.EventFunc
 }
 
-func (e execRuntime) run(subtask string) agent.RunResult {
+// runIn runs the executor with its workspace pointed at workdir (a shared dir or
+// an isolated worktree).
+func (e execRuntime) runIn(workdir, subtask string) agent.RunResult {
 	a := agent.New("executor:"+e.name, e.provider, e.model, executorSystem,
-		tool.Make(e.workdir, true), e.maxTurns, e.budget, e.onEvent)
+		tool.Make(workdir, true), e.maxTurns, e.budget, e.onEvent)
 	return a.Run(subtask)
 }
 
@@ -81,7 +83,9 @@ func roster(execs []config.Executor) string {
 }
 
 // Build returns the orchestrator agent for the given config and workspace.
-func Build(cfg config.Config, workdir string, onEvent core.EventFunc) (*agent.Agent, error) {
+// When isolate is true and workdir is a git repo, each parallel subtask runs in
+// its own worktree and its changes are merged back automatically.
+func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFunc) (*agent.Agent, error) {
 	if cfg.Orchestrator.APIKey == "" {
 		return nil, fmt.Errorf("no orchestrator API key (set ANTHROPIC_API_KEY or run `cheep config`)")
 	}
@@ -98,12 +102,12 @@ func Build(cfg config.Config, workdir string, onEvent core.EventFunc) (*agent.Ag
 			provider: provider.NewOpenAI(e.BaseURL, e.APIKey, 4096),
 			maxTurns: e.MaxTurns,
 			budget:   e.TokenBudget,
-			workdir:  workdir,
 			onEvent:  onEvent,
 		}
 		order = append(order, e.Name)
 	}
 	defaultExec := order[0]
+	isolated := isolate && worktree.IsRepo(workdir)
 
 	delegate := func(args map[string]any) string {
 		rawTasks, _ := args["tasks"].([]any)
@@ -126,13 +130,33 @@ func Build(cfg config.Config, workdir string, onEvent core.EventFunc) (*agent.Ag
 
 		results := make([]map[string]any, len(jobs))
 		var wg sync.WaitGroup
+		var gitMu sync.Mutex // serialize git index operations (add/merge/remove)
+		var counter int
+
 		for i, j := range jobs {
 			wg.Add(1)
 			go func(i int, j job) {
 				defer wg.Done()
 				rt := runtimes[j.executor]
-				r := rt.run(j.subtask)
-				results[i] = map[string]any{
+
+				// Pick a workspace: an isolated worktree, or the shared dir.
+				wd := workdir
+				var tree *worktree.Tree
+				if isolated {
+					gitMu.Lock()
+					counter++
+					t, err := worktree.Add(workdir, rt.name, counter)
+					gitMu.Unlock()
+					if err == nil {
+						tree, wd = t, t.Path
+					} else {
+						rt.onEvent(core.Event{Agent: "cheep", Type: "status",
+							Status: "worktree unavailable, using shared dir: " + err.Error()})
+					}
+				}
+
+				r := rt.runIn(wd, j.subtask)
+				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,
 					"status":        r.Status,
@@ -141,6 +165,31 @@ func Build(cfg config.Config, workdir string, onEvent core.EventFunc) (*agent.Ag
 					"output_tokens": r.OutputTokens,
 					"output":        r.Output,
 				}
+
+				// Commit + merge the isolated work back into the base branch.
+				if tree != nil {
+					gitMu.Lock()
+					committed, cErr := tree.CommitAll("cheep: " + rt.name + " subtask")
+					switch {
+					case cErr != nil:
+						res["integration"] = "commit failed: " + cErr.Error()
+						tree.Remove(true)
+					case !committed:
+						res["integration"] = "no file changes"
+						tree.Remove(false)
+					default:
+						if mErr := tree.MergeInto(); mErr != nil {
+							res["integration"] = mErr.Error() + " (kept on branch " + tree.Branch + ")"
+							tree.Remove(true) // keep branch for manual resolution
+						} else {
+							res["integration"] = "merged"
+							tree.Remove(false)
+						}
+					}
+					gitMu.Unlock()
+				}
+
+				results[i] = res
 			}(i, j)
 		}
 		wg.Wait()
@@ -181,6 +230,12 @@ func Build(cfg config.Config, workdir string, onEvent core.EventFunc) (*agent.Ag
 	}
 
 	system := fmt.Sprintf(orchestratorSystemTmpl, roster(cfg.Executors))
+	if isolated {
+		system += "\n\nIsolation is ON: each delegated subtask runs in its own git worktree and is " +
+			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +
+			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
+			"follow-up subtask (or resolve it yourself with git) before continuing."
+	}
 	tools := append(tool.Make(workdir, false), delegateTool)
 	return agent.New(
 		"orchestrator",
