@@ -1,0 +1,74 @@
+# GoReleaser config — https://goreleaser.com
+# Builds static binaries for every platform, publishes them to a GitHub Release,
+# and updates the Homebrew tap so `brew install cheep` works.
+version: 2
+
+project_name: cheep
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cheep
+    main: .
+    binary: cheep
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: cheep
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: TedHaley
+    name: cheep
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+# Updates a cask in github.com/TedHaley/homebrew-tap on each release.
+# After `brew tap TedHaley/homebrew-tap`, macOS users can `brew install cheep`.
+# (Homebrew casks are macOS-only; Linux users should use `go install` or a direct download.)
+homebrew_casks:
+  - name: cheep
+    binaries:
+      - cheep
+    repository:
+      owner: TedHaley
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://tedhaley.github.io/cheep/"
+    description: "A Claude orchestrator that coordinates local Qwen executor agents."
+    # The binary is unsigned, so strip the Gatekeeper quarantine flag on install.
+    # (Replace with proper code-signing later to remove this workaround.)
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cheep"]
+          end

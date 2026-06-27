@@ -1,0 +1,6 @@
+# Build output
+/cheep
+/dist/
+
+# Editor / IDE
+.idea/

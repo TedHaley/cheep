@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cheep — cheap local executors, smart cloud orchestrator</title>
+<meta name="description" content="cheep is a tiny CLI where Claude orchestrates and verifies the work of free local Qwen executor agents.">
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --muted: #8b949e; --accent: #f5c518; --green: #3fb950; --cyan: #56d4dd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  a { color: var(--cyan); }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 0 20px; }
+  header { text-align: center; padding: 72px 20px 40px; }
+  h1 { font-size: 56px; margin: 0; letter-spacing: -1px; }
+  h1 .bird { color: var(--accent); }
+  .tag { color: var(--muted); font-size: 20px; margin-top: 8px; }
+  .badges { margin-top: 20px; }
+  .badges a {
+    display: inline-block; margin: 4px; padding: 6px 14px; border: 1px solid var(--border);
+    border-radius: 999px; text-decoration: none; color: var(--fg); font-size: 14px;
+  }
+  .badges a:hover { border-color: var(--accent); }
+  section { padding: 28px 0; border-top: 1px solid var(--border); }
+  h2 { font-size: 24px; margin: 0 0 14px; }
+  h3 { font-size: 16px; color: var(--muted); margin: 22px 0 8px; text-transform: uppercase; letter-spacing: .5px; }
+  pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; overflow-x: auto; font-size: 14px;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  p code, li code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .card .who { font-weight: 600; }
+  .card.cheap .who { color: var(--green); }
+  .card.smart .who { color: var(--cyan); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  td code { color: var(--accent); }
+  .dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .dl a {
+    display: flex; justify-content: space-between; padding: 12px 14px; text-decoration: none;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--fg);
+  }
+  .dl a:hover { border-color: var(--accent); }
+  .dl a .os { font-weight: 600; }
+  .dl a .arch { color: var(--muted); }
+  footer { color: var(--muted); text-align: center; padding: 40px 20px; font-size: 14px; }
+  @media (max-width: 600px) { h1 { font-size: 42px; } .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1><span class="bird">~</span>cheep</h1>
+    <div class="tag">Claude orchestrates. Local Qwen does the work. You pay almost nothing.</div>
+    <div class="badges">
+      <a href="https://github.com/TedHaley/cheep">GitHub</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/TedHaley/cheep/releases/latest">Releases</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>What is it?</h2>
+    <p><strong>cheep</strong> is a tiny, single-binary CLI for multi-agent coding. One expensive,
+    capable <em>orchestrator</em> (Claude) breaks your task into pieces, hands each to a free,
+    local <em>executor</em> (Qwen via Ollama), then verifies the work and recovers any executor
+    that gets stuck — loops, runs out of context, or errors out.</p>
+    <div class="grid">
+      <div class="card smart">
+        <div class="who">Orchestrator — Claude</div>
+        Plans, delegates, and verifies. Reads files and runs tests to check the work. Never edits code itself.
+      </div>
+      <div class="card cheap">
+        <div class="who">Executors — local Qwen</div>
+        Do the actual editing and running. Free and unlimited on your own hardware.
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+
+    <h3>Homebrew (macOS &amp; Linux)</h3>
+    <pre><code>brew tap TedHaley/homebrew-tap
+brew install cheep</code></pre>
+
+    <h3>Go</h3>
+    <pre><code>go install github.com/TedHaley/cheep@latest</code></pre>
+
+    <h3>Download a binary</h3>
+    <div class="dl">
+      <a href="https://github.com/TedHaley/cheep/releases/latest/download/cheep_darwin_arm64.tar.gz"><span class="os">macOS</span><span class="arch">Apple Silicon</span></a>
+      <a href="https://github.com/TedHaley/cheep/releases/latest/download/cheep_darwin_amd64.tar.gz"><span class="os">macOS</span><span class="arch">Intel</span></a>
+      <a href="https://github.com/TedHaley/cheep/releases/latest/download/cheep_linux_amd64.tar.gz"><span class="os">Linux</span><span class="arch">x86_64</span></a>
+      <a href="https://github.com/TedHaley/cheep/releases/latest/download/cheep_linux_arm64.tar.gz"><span class="os">Linux</span><span class="arch">arm64</span></a>
+      <a href="https://github.com/TedHaley/cheep/releases/latest/download/cheep_windows_amd64.zip"><span class="os">Windows</span><span class="arch">x86_64</span></a>
+    </div>
+  </section>
+
+  <section>
+    <h2>Quick start</h2>
+    <pre><code># 1. Run a local model with an OpenAI-compatible endpoint
+ollama serve &amp;
+ollama pull qwen2.5-coder
+
+# 2. Give Claude an API key
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. Check both ends are reachable
+cheep check
+
+# 4. Hand it a task
+cheep run "add a /health endpoint and a test for it" --workdir .</code></pre>
+  </section>
+
+  <section>
+    <h2>Configuration</h2>
+    <p>Everything is environment variables, with sane defaults (Claude Sonnet + local Qwen on Ollama):</p>
+    <table>
+      <tr><th>Variable</th><th>Default</th></tr>
+      <tr><td><code>ANTHROPIC_API_KEY</code></td><td>— (required)</td></tr>
+      <tr><td><code>CHEEP_ORCHESTRATOR_MODEL</code></td><td>claude-sonnet-4-6</td></tr>
+      <tr><td><code>CHEEP_EXECUTOR_MODEL</code></td><td>qwen2.5-coder</td></tr>
+      <tr><td><code>CHEEP_EXECUTOR_BASE_URL</code></td><td>http://localhost:11434/v1</td></tr>
+      <tr><td><code>CHEEP_EXECUTOR_API_KEY</code></td><td>ollama</td></tr>
+      <tr><td><code>CHEEP_EXECUTOR_TOKEN_BUDGET</code></td><td>100000</td></tr>
+    </table>
+  </section>
+
+  <footer>
+    Single static binary · zero runtime dependencies · MIT licensed<br>
+    <a href="https://github.com/TedHaley/cheep">github.com/TedHaley/cheep</a>
+  </footer>
+
+</div>
+</body>
+</html>
