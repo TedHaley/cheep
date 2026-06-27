@@ -1,11 +1,9 @@
-// Package orchestrator wires the orchestrator agent and the tools it uses to
-// command a fleet of executors.
+// Package orchestrator wires the orchestrator agent and the tools it uses.
 //
-// The orchestrator (Claude) knows the roster of executors and which model each
-// one runs, so it can route subtasks to the most suitable worker. Its `delegate`
-// tool accepts a list of subtasks and runs them in PARALLEL across the named
-// executors, each a fresh agent with no shared context. Each executor returns a
-// status the orchestrator uses to verify or recover the work.
+// With executors configured, the orchestrator decomposes work and delegates it
+// across them in parallel (each in its own git worktree when isolation is on),
+// then verifies and integrates the results. With no executors, it runs solo:
+// the same agent does the work directly with the full tool set.
 package orchestrator
 
 import (
@@ -23,16 +21,21 @@ import (
 )
 
 const executorSystem = `You are an executor agent: a focused, capable coding/execution worker.
-You receive one concrete subtask from an orchestrator and complete it using your tools
-(read_file, write_file, list_dir, run_bash). Work autonomously and efficiently.
+You receive one concrete subtask and complete it using your tools (read_file, write_file,
+list_dir, run_bash). Work autonomously and efficiently.
 
-When the subtask is fully done, STOP calling tools and reply with a short summary of
-exactly what you did and how it can be verified. If you get blocked, stop and explain
-clearly what is blocking you and why.`
+When the subtask is fully done, STOP calling tools and reply with a short summary of exactly
+what you did and how it can be verified. If you get blocked, stop and explain what is
+blocking you and why.`
+
+const soloSystem = `You are cheep, a capable autonomous coding agent. Complete the user's task
+directly using your tools (read_file, write_file, list_dir, run_bash). Plan briefly, make the
+changes, and verify them (read files back, run tests/commands). When the task is done, stop
+calling tools and give a short summary of what you did and how to verify it.`
 
 const orchestratorSystemTmpl = `You are the orchestrator. You coordinate a fleet of cheaper
-executor agents to accomplish the user's overall task. You are expensive; the executors are
-cheap. Be economical: plan and delegate rather than doing the work yourself.
+executor agents to accomplish the user's task. You are expensive; the executors are cheap.
+Be economical: plan and delegate rather than doing the work yourself.
 
 %s
 - DECOMPOSE the task into concrete, self-contained subtasks.
@@ -40,7 +43,7 @@ cheap. Be economical: plan and delegate rather than doing the work yourself.
   so dispatch independent subtasks together in one call. Each task is
   {"executor": "<name>", "subtask": "<full instructions>"}.
 - ROUTE each subtask to the executor whose model is best suited to it, based on the models
-  listed above. If a subtask has no obvious best fit, pick any executor.
+  listed above. If there is no obvious best fit, pick any executor.
 - Executors share NO memory or context with you or each other; every subtask must contain
   all the detail it needs to be done in isolation.
 - VERIFY every result yourself with read_file, list_dir and run_bash. Never trust a "done"
@@ -61,15 +64,13 @@ type execRuntime struct {
 	onEvent  core.EventFunc
 }
 
-// runIn runs the executor with its workspace pointed at workdir (a shared dir or
-// an isolated worktree).
 func (e execRuntime) runIn(workdir, subtask string) agent.RunResult {
 	a := agent.New("executor:"+e.name, e.provider, e.model, executorSystem,
 		tool.Make(workdir, true), e.maxTurns, e.budget, e.onEvent)
 	return a.Run(subtask)
 }
 
-func roster(execs []config.Executor) string {
+func roster(execs []config.Agent) string {
 	var b strings.Builder
 	b.WriteString("Your executors (delegate to these by name):\n")
 	for _, e := range execs {
@@ -86,11 +87,18 @@ func roster(execs []config.Executor) string {
 // When isolate is true and workdir is a git repo, each parallel subtask runs in
 // its own worktree and its changes are merged back automatically.
 func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFunc) (*agent.Agent, error) {
-	if cfg.Orchestrator.APIKey == "" {
-		return nil, fmt.Errorf("no orchestrator API key (set ANTHROPIC_API_KEY or run `cheep config`)")
+	if cfg.Orchestrator.Provider == "anthropic" && cfg.Orchestrator.APIKey == "" {
+		return nil, fmt.Errorf("orchestrator has no API key (set ANTHROPIC_API_KEY or run /config)")
 	}
+	if cfg.Orchestrator.Model == "" {
+		return nil, fmt.Errorf("orchestrator has no model set (run /config)")
+	}
+	orchProv := provider.For(cfg.Orchestrator.Provider, cfg.Orchestrator.Endpoint, cfg.Orchestrator.APIKey, 4096)
+
+	// Solo mode: no executors, the orchestrator does the work itself.
 	if len(cfg.Executors) == 0 {
-		return nil, fmt.Errorf("no executors configured (run `cheep config`)")
+		return agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
+			tool.Make(workdir, true), cfg.Orchestrator.MaxTurns, 0, onEvent), nil
 	}
 
 	runtimes := map[string]execRuntime{}
@@ -99,7 +107,7 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 		runtimes[e.Name] = execRuntime{
 			name:     e.Name,
 			model:    e.Model,
-			provider: provider.NewOpenAI(e.BaseURL, e.APIKey, 4096),
+			provider: provider.For(e.Provider, e.Endpoint, e.APIKey, 4096),
 			maxTurns: e.MaxTurns,
 			budget:   e.TokenBudget,
 			onEvent:  onEvent,
@@ -139,7 +147,6 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 				defer wg.Done()
 				rt := runtimes[j.executor]
 
-				// Pick a workspace: an isolated worktree, or the shared dir.
 				wd := workdir
 				var tree *worktree.Tree
 				if isolated {
@@ -166,7 +173,6 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 					"output":        r.Output,
 				}
 
-				// Commit + merge the isolated work back into the base branch.
 				if tree != nil {
 					gitMu.Lock()
 					committed, cErr := tree.CommitAll("cheep: " + rt.name + " subtask")
@@ -180,7 +186,7 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 					default:
 						if mErr := tree.MergeInto(); mErr != nil {
 							res["integration"] = mErr.Error() + " (kept on branch " + tree.Branch + ")"
-							tree.Remove(true) // keep branch for manual resolution
+							tree.Remove(true)
 						} else {
 							res["integration"] = "merged"
 							tree.Remove(false)
@@ -237,14 +243,6 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 			"follow-up subtask (or resolve it yourself with git) before continuing."
 	}
 	tools := append(tool.Make(workdir, false), delegateTool)
-	return agent.New(
-		"orchestrator",
-		provider.NewAnthropic(cfg.Orchestrator.APIKey, 4096),
-		cfg.Orchestrator.Model,
-		system,
-		tools,
-		cfg.Orchestrator.MaxTurns,
-		0,
-		onEvent,
-	), nil
+	return agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
+		cfg.Orchestrator.MaxTurns, 0, onEvent), nil
 }
