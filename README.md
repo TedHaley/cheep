@@ -7,7 +7,7 @@
 **executor** (Qwen via Ollama), verifies the work, and recovers any executor that gets
 stuck — loops, runs out of context, or errors out.
 
-Website & docs: **https://tedhaley.github.io/cheep/**
+Website & docs: **https://tedhaley.ca/cheep/**
 
 ## Install
 

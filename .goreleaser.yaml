@@ -62,7 +62,7 @@ homebrew_casks:
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: "https://tedhaley.github.io/cheep/"
+    homepage: "https://tedhaley.ca/cheep/"
     description: "A Claude orchestrator that coordinates local Qwen executor agents."
     # The binary is unsigned, so strip the Gatekeeper quarantine flag on install.
     # (Replace with proper code-signing later to remove this workaround.)
