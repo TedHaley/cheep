@@ -135,6 +135,7 @@ func (m model) viewHelp() string {
 		"         multi-agent delegation happens only in AUTO mode;",
 		"         chat = talk only, plan = read-only investigation.",
 		"agents:  tab = next · ctrl+←/→ = prev/next · pgup/pgdn = scroll",
+		"         ctrl+w (or /close) closes the focused executor tab",
 		"cancel:  esc cancels a running task",
 		"",
 		"commands:",

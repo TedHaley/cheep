@@ -8,6 +8,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -127,6 +128,46 @@ func renderMarkdown(md string, width int) []string {
 		lines[0] = bullet + strings.TrimLeft(lines[0], " ")
 	}
 	return lines
+}
+
+// delegateLines turns a delegate tool call into one readable line per subtask.
+func delegateLines(args map[string]any, cfg config.Config) []string {
+	tasks, _ := args["tasks"].([]any)
+	var out []string
+	for _, t := range tasks {
+		mm, _ := t.(map[string]any)
+		ex, _ := mm["executor"].(string)
+		sub, _ := mm["subtask"].(string)
+		target := ex
+		for _, e := range cfg.Executors {
+			if e.Name == ex {
+				target = ex + " (" + e.Model + ")"
+				break
+			}
+		}
+		out = append(out, todoProgSt.Render("→ delegate")+" "+short(sub, 64)+hintSt.Render(" → "+target))
+	}
+	if len(out) == 0 {
+		out = []string{todoProgSt.Render("→ delegate") + " (no tasks)"}
+	}
+	return out
+}
+
+// delegateResultLines collapses the JSON result into one line per executor.
+func delegateResultLines(result string) []string {
+	var rs []struct{ Executor, Status string }
+	if json.Unmarshal([]byte(result), &rs) != nil || len(rs) == 0 {
+		return nil
+	}
+	var out []string
+	for _, r := range rs {
+		g := okSt.Render("✓")
+		if r.Status != "completed" {
+			g = errSt.Render("✗")
+		}
+		out = append(out, "  "+g+" "+r.Executor+hintSt.Render(" · "+r.Status))
+	}
+	return out
 }
 
 func parseTodos(args map[string]any) []todoItem {
@@ -407,6 +448,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.overlay = "help"
 				return m, nil
 			}
+		case "ctrl+w":
+			if m.active > 0 {
+				(&m).closeTab(m.active)
+			}
+			return m, nil
 		case "shift+tab":
 			m.mode = orchestrator.NextMode(m.mode)
 			(&m).rebuild(true)
@@ -527,6 +573,12 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	case "/mode":
 		m.mode = orchestrator.NextMode(m.mode)
 		(&m).rebuild(true)
+	case "/close":
+		if m.active == 0 {
+			m.footer = "can't close the orchestrator tab"
+		} else {
+			(&m).closeTab(m.active)
+		}
 	case "/clear":
 		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg)}}
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
@@ -571,6 +623,23 @@ func (m *model) tabFor(name string) int {
 
 func (m *model) appendLine(idx int, line string) {
 	m.tabs[idx].lines = append(m.tabs[idx].lines, line)
+}
+
+// closeTab removes an executor tab (never the orchestrator at index 0).
+func (m *model) closeTab(idx int) {
+	if idx <= 0 || idx >= len(m.tabs) {
+		return
+	}
+	m.tabs = append(m.tabs[:idx], m.tabs[idx+1:]...)
+	m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
+	for i, t := range m.tabs {
+		m.byName[t.id] = i
+	}
+	if m.active >= len(m.tabs) {
+		m.active = len(m.tabs) - 1
+	}
+	m.follow = true
+	m.syncViewport()
 }
 
 func (m *model) applyEvent(e core.Event) {
@@ -620,6 +689,10 @@ func (m *model) applyEvent(e core.Event) {
 	case "tool_call":
 		if e.Tool == "delegate" {
 			m.delegated = true
+			for _, l := range delegateLines(e.Args, m.cfg) {
+				m.appendLine(idx, l)
+			}
+			break
 		}
 		if e.Tool == "update_todos" {
 			m.tabs[idx].todos = parseTodos(e.Args) // single list, updated in place
@@ -631,7 +704,13 @@ func (m *model) applyEvent(e core.Event) {
 		m.appendLine(idx, "→ "+e.Tool+"("+shortArgs(e.Args)+")")
 	case "tool_result":
 		if e.Tool == "update_todos" {
-			break // the checklist is shown by the tool_call; skip the raw result
+			break // the checklist is shown as the sticky header
+		}
+		if e.Tool == "delegate" {
+			for _, l := range delegateResultLines(e.Result) {
+				m.appendLine(idx, l)
+			}
+			break
 		}
 		g := okSt.Render("✓")
 		if isErrResult(e.Result) {
