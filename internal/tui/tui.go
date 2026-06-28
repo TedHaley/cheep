@@ -83,7 +83,31 @@ var (
 	tabSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Padding(0, 1)
 	hintSt      = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	barSt       = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	bulletSt    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
+	okSt        = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	errSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	userSt      = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("237"))
+	todoDoneSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 )
+
+func renderTodos(args map[string]any) []string {
+	ts, _ := args["todos"].([]any)
+	out := []string{lipgloss.NewStyle().Bold(true).Render("Todos")}
+	for _, t := range ts {
+		mm, _ := t.(map[string]any)
+		title, _ := mm["title"].(string)
+		switch s, _ := mm["status"].(string); s {
+		case "done":
+			out = append(out, "  "+todoDoneSt.Render("✓ "+title))
+		case "in_progress":
+			out = append(out, "  "+todoProgSt.Render("◉ "+title))
+		default:
+			out = append(out, "  ○ "+title)
+		}
+	}
+	return out
+}
 
 // Version is shown in the header; set by main before Run.
 var Version = "dev"
@@ -159,21 +183,35 @@ func gradientBanner() []string {
 // welcomeLines renders the banner beside a bordered config box as the
 // orchestrator tab's opening content (it scrolls away as you work).
 func welcomeLines(cfg config.Config) []string {
-	exec := "solo — orchestrator does the work itself"
-	if len(cfg.Executors) > 0 {
+	shared := len(cfg.Executors) > 0
+	for _, e := range cfg.Executors {
+		if e.Model != cfg.Orchestrator.Model {
+			shared = false
+		}
+	}
+	var info []string
+	switch {
+	case len(cfg.Executors) == 0:
+		info = []string{"orchestrator | " + cfg.Orchestrator.Model, "mode         | solo"}
+	case shared:
+		info = []string{
+			"model | " + cfg.Orchestrator.Model,
+			hintSt.Render(fmt.Sprintf("shared by orchestrator + %d executor(s)", len(cfg.Executors))),
+		}
+	default:
 		names := make([]string, len(cfg.Executors))
 		for i, e := range cfg.Executors {
 			names[i] = e.Name
 		}
-		exec = strings.Join(names, ", ")
+		info = []string{
+			"orchestrator | " + cfg.Orchestrator.Model,
+			"executors    | " + strings.Join(names, ", "),
+		}
 	}
-	boxBody := strings.Join([]string{
-		lipgloss.NewStyle().Bold(true).Render(">_ cheep (" + Version + ")"),
+	boxBody := strings.Join(append([]string{
+		lipgloss.NewStyle().Bold(true).Render(">_ cheep " + Version),
 		"",
-		"orchestrator | " + cfg.Orchestrator.Model,
-		"executors    | " + exec,
-		hintSt.Render(shortWorkdir()),
-	}, "\n")
+	}, append(info, hintSt.Render(shortWorkdir()))...), "\n")
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("240")).
@@ -341,7 +379,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if m.running {
 		// Queue it — it runs automatically when the current task finishes.
 		m.queue = append(m.queue, text)
-		(&m).appendLine(0, "› "+text+"  "+hintSt.Render("(queued)"))
+		(&m).appendLine(0, userSt.Render(" › "+text+" ")+"  "+hintSt.Render("(queued)"))
 		m.active = 0
 		m.follow = true
 		(&m).syncViewport()
@@ -351,7 +389,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m model) startTask(text string) (tea.Model, tea.Cmd) {
-	(&m).appendLine(0, lipgloss.NewStyle().Bold(true).Render("› "+text))
+	(&m).appendLine(0, userSt.Render(" › "+text+" "))
 	m.tabs[0].status = "run"
 	m.active = 0
 	m.follow = true
@@ -442,14 +480,23 @@ func (m *model) applyEvent(e core.Event) {
 		}
 	case "text":
 		if e.Text != "" {
-			m.appendLine(idx, "✦ "+e.Text)
+			m.appendLine(idx, bulletSt.Render("●")+" "+e.Text)
 		}
 	case "tool_call":
+		if e.Tool == "update_todos" {
+			for _, l := range renderTodos(e.Args) {
+				m.appendLine(idx, l)
+			}
+			break
+		}
 		m.appendLine(idx, "→ "+e.Tool+"("+shortArgs(e.Args)+")")
 	case "tool_result":
-		g := "✓"
+		if e.Tool == "update_todos" {
+			break // the checklist is shown by the tool_call; skip the raw result
+		}
+		g := okSt.Render("✓")
 		if isErrResult(e.Result) {
-			g = "✗"
+			g = errSt.Render("✗")
 		}
 		m.appendLine(idx, "  "+g+" "+short(e.Result, 200))
 	case "status":

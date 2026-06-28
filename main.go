@@ -26,7 +26,7 @@ import (
 )
 
 // version is stamped at build time by GoReleaser (-X main.version=...).
-var version = "dev"
+var version = "v0.0.1"
 
 const (
 	cReset  = "\033[0m"

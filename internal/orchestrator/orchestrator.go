@@ -26,6 +26,9 @@ const executorSystem = `You are an executor agent: a focused, capable coding/exe
 You receive one concrete subtask and complete it using your tools (read_file, write_file,
 list_dir, run_bash). Work autonomously and efficiently.
 
+For multi-step work, call update_todos to lay out the steps up front, then mark each
+in_progress/done as you go so your progress is visible.
+
 When the subtask is fully done, STOP calling tools and reply with a short summary of exactly
 what you did and how it can be verified. If you get blocked, stop and explain what is
 blocking you and why.`
@@ -81,6 +84,8 @@ executor agents to accomplish the user's task. You are expensive; the executors 
 Be economical: plan and delegate rather than doing the work yourself.
 
 %s
+- PLAN with update_todos: lay out the subtasks as a checklist and mark each
+  in_progress/done as you delegate and verify, so the user can watch progress.
 - DECOMPOSE the task into concrete, self-contained subtasks.
 - DELEGATE with the "delegate" tool. It takes a LIST of tasks and runs them in PARALLEL,
   so dispatch independent subtasks together in one call. Each task is

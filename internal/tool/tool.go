@@ -180,5 +180,29 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 			Func:        writeFile,
 		})
 	}
+
+	// update_todos is a UI/planning tool: it has no side effect, but the shell
+	// renders the checklist and checks items off as their status changes.
+	tools = append(tools, core.Tool{
+		Name: "update_todos",
+		Description: "Maintain a checklist of the steps for the current task. Call it when you " +
+			"plan the work and again whenever a step starts or finishes. Always send the FULL list.",
+		Parameters: obj(map[string]any{
+			"todos": map[string]any{
+				"type": "array",
+				"items": obj(map[string]any{
+					"title":  str,
+					"status": map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "done"}},
+				}, "title", "status"),
+			},
+		}, "todos"),
+		Func: func(args map[string]any) string {
+			n := 0
+			if ts, ok := args["todos"].([]any); ok {
+				n = len(ts)
+			}
+			return fmt.Sprintf("todo list updated (%d items)", n)
+		},
+	})
 	return tools
 }
