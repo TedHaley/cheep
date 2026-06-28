@@ -83,6 +83,7 @@ type model struct {
 
 	usage      map[string][2]int // model -> {input, output} tokens this session
 	usageOrder []string          // models in first-seen order
+	usageRole  map[string][2]int // "orchestrator"/"executor" -> {input, output}
 
 	// overlay: "" (none) | "help" | "setup"
 	overlay string
@@ -262,8 +263,9 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 			}
 		},
 		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg)}},
-		byName: map[string]int{"orchestrator": 0, "cheep": 0},
-		usage:  map[string][2]int{},
+		byName:    map[string]int{"orchestrator": 0, "cheep": 0},
+		usage:     map[string][2]int{},
+		usageRole: map[string][2]int{},
 		input:  ta,
 		sp:     sp,
 		vp:     viewport.New(80, 20),
@@ -401,7 +403,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.cancel = nil
 		m.tabs[0].status = statusKey(msg.r.Status)
-		m.footer = fmt.Sprintf("%s · %d turns · %d→%d tokens", msg.r.Status, msg.r.Turns, msg.r.InputTokens, msg.r.OutputTokens)
+		m.footer = fmt.Sprintf("%s · %d turns · %s in / %s out (this turn)", msg.r.Status, msg.r.Turns, human(msg.r.InputTokens), human(msg.r.OutputTokens))
 		if m.keepTabs {
 			if len(m.tabs) > 1 {
 				m.footer += "   tab → executor, ctrl+w to close"
@@ -543,6 +545,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	}
 	m.nudges = 0
 	m.openTodos = 0
+	m.tabs[0].todos = nil // dismiss the previous task's checklist
 	return m.startTask(text)
 }
 
@@ -685,7 +688,7 @@ func (m *model) closeTab(idx int) {
 }
 
 func (m *model) applyEvent(e core.Event) {
-	if e.Type == "usage" { // accumulate token usage per model
+	if e.Type == "usage" { // accumulate token usage per model and per role
 		if e.Model != "" {
 			if _, seen := m.usage[e.Model]; !seen {
 				m.usageOrder = append(m.usageOrder, e.Model)
@@ -694,6 +697,15 @@ func (m *model) applyEvent(e core.Event) {
 			u[0] += e.InTok
 			u[1] += e.OutTok
 			m.usage[e.Model] = u
+
+			role := "executor"
+			if e.Agent == "orchestrator" || e.Agent == "cheep" {
+				role = "orchestrator"
+			}
+			r := m.usageRole[role]
+			r[0] += e.InTok
+			r[1] += e.OutTok
+			m.usageRole[role] = r
 		}
 		return
 	}
@@ -720,7 +732,7 @@ func (m *model) applyEvent(e core.Event) {
 			m.appendLine(idx, hintSt.Render("● started"))
 		} else {
 			t.status = statusKey(e.Status)
-			line := "■ " + e.Status
+			line := glyph(t.status) + " " + describeStatus(e.Status)
 			if idx != 0 { // executor finished — show how to close its tab
 				line += "  ·  ctrl+w or /close to close this tab"
 			}
@@ -887,6 +899,26 @@ func isErrResult(s string) bool {
 	return false
 }
 
+func describeStatus(s string) string {
+	switch s {
+	case "completed":
+		return "completed"
+	case "max_turns":
+		return "stopped early — hit the turn limit"
+	case "looping":
+		return "stopped early — detected a repeating loop"
+	case "context_exhausted":
+		return "stopped early — ran out of context budget"
+	case "timeout":
+		return "stopped early — timed out"
+	case "aborted":
+		return "cancelled"
+	case "error":
+		return "error"
+	}
+	return s
+}
+
 func statusKey(s string) string {
 	switch s {
 	case "completed":
@@ -917,26 +949,20 @@ func (m model) isLocal(model string) bool {
 	return false
 }
 
-// tokenSummary is the compact persistent counter (e.g. "Σ 12k cloud · 84k local").
+// tokenSummary is the compact persistent counter (e.g. "Σ orch 13k · exec 81k").
 func (m model) tokenSummary() string {
-	var local, cloud int
-	for _, model := range m.usageOrder {
-		u := m.usage[model]
-		if m.isLocal(model) {
-			local += u[0] + u[1]
-		} else {
-			cloud += u[0] + u[1]
-		}
-	}
-	if local+cloud == 0 {
+	o := m.usageRole["orchestrator"]
+	e := m.usageRole["executor"]
+	ot, et := o[0]+o[1], e[0]+e[1]
+	if ot+et == 0 {
 		return ""
 	}
 	var parts []string
-	if cloud > 0 {
-		parts = append(parts, human(cloud)+" cloud")
+	if ot > 0 {
+		parts = append(parts, "orch "+human(ot))
 	}
-	if local > 0 {
-		parts = append(parts, human(local)+" local")
+	if et > 0 {
+		parts = append(parts, "exec "+human(et))
 	}
 	return "Σ " + strings.Join(parts, " · ")
 }
@@ -954,6 +980,14 @@ func (m model) tokenLines() []string {
 		return []string{"no token usage yet this session"}
 	}
 	out := []string{lipgloss.NewStyle().Bold(true).Render("Token usage this session")}
+	for _, role := range []string{"orchestrator", "executor"} {
+		u := m.usageRole[role]
+		if u[0]+u[1] == 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf("  %-13s in %s · out %s", role, human(u[0]), human(u[1])))
+	}
+	out = append(out, "")
 	local := 0
 	for _, model := range m.usageOrder {
 		u := m.usage[model]
@@ -962,10 +996,10 @@ func (m model) tokenLines() []string {
 			tag = "local · free"
 			local += u[0] + u[1]
 		}
-		out = append(out, fmt.Sprintf("  %-30s in %d · out %d  (%s)", model, u[0], u[1], tag))
+		out = append(out, fmt.Sprintf("  %-30s in %s · out %s  (%s)", model, human(u[0]), human(u[1]), tag))
 	}
 	if local > 0 {
-		out = append(out, todoDoneSt.Render(fmt.Sprintf("  %d tokens ran on local models at no API cost", local)))
+		out = append(out, todoDoneSt.Render(fmt.Sprintf("  %s tokens ran on local models at no API cost", human(local))))
 	}
 	return out
 }

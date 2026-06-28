@@ -134,6 +134,7 @@ func (m model) viewHelp() string {
 		"modes:   shift+tab cycles chat → plan → auto  (or /chat /plan /auto)",
 		"         multi-agent delegation happens only in AUTO mode;",
 		"         chat = talk only, plan = read-only investigation.",
+		"glyphs:  ● running · ✓ done · ⚠ stopped early · ✗ error",
 		"agents:  tab = next · ctrl+←/→ = prev/next · pgup/pgdn = scroll",
 		"         ctrl+w (or /close) closes the focused executor tab",
 		"         /keeptabs toggles auto-close of finished executor tabs",
