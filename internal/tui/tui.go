@@ -808,7 +808,15 @@ func (m model) View() string {
 			status = m.footer + "   " + status
 		}
 	}
-	hint := modeLabel(m.mode) + "   " + status
+	left := modeLabel(m.mode) + "   " + status
+	hint := left
+	if tok := hintSt.Render(m.tokenSummary()); tok != "" {
+		gap := m.w - lipgloss.Width(left) - lipgloss.Width(tok)
+		if gap < 1 {
+			gap = 1
+		}
+		hint = left + strings.Repeat(" ", gap) + tok
+	}
 	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
 	parts := []string{m.tabBar()}
 	if header := todoHeaderLines(m.tabs[m.active].todos); len(header) > 0 {
@@ -904,6 +912,38 @@ func (m model) isLocal(model string) bool {
 		}
 	}
 	return false
+}
+
+// tokenSummary is the compact persistent counter (e.g. "Σ 12k cloud · 84k local").
+func (m model) tokenSummary() string {
+	var local, cloud int
+	for _, model := range m.usageOrder {
+		u := m.usage[model]
+		if m.isLocal(model) {
+			local += u[0] + u[1]
+		} else {
+			cloud += u[0] + u[1]
+		}
+	}
+	if local+cloud == 0 {
+		return ""
+	}
+	var parts []string
+	if cloud > 0 {
+		parts = append(parts, human(cloud)+" cloud")
+	}
+	if local > 0 {
+		parts = append(parts, human(local)+" local")
+	}
+	return "Σ " + strings.Join(parts, " · ")
+}
+
+func human(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	s := fmt.Sprintf("%.1fk", float64(n)/1000)
+	return strings.Replace(s, ".0k", "k", 1)
 }
 
 func (m model) tokenLines() []string {
