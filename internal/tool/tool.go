@@ -53,6 +53,19 @@ func argStr(args map[string]any, key string) string {
 	return ""
 }
 
+// MakeReadOnly returns a non-mutating subset for plan mode: no run_bash, no
+// write_file — only read_file, list_dir, and update_todos.
+func MakeReadOnly(workdir string) []core.Tool {
+	var out []core.Tool
+	for _, t := range Make(workdir, false) {
+		if t.Name == "run_bash" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
 // Make builds the tool set for a workspace. includeWrite adds write_file.
 func Make(workdir string, includeWrite bool) []core.Tool {
 	if abs, err := filepath.Abs(workdir); err == nil {

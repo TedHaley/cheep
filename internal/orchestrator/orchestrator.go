@@ -44,10 +44,9 @@ tasks. If they want you to investigate the code, suggest switching to plan mode;
 work done, suggest auto mode.`
 
 const planSystem = `You are cheep in PLAN MODE. Investigate the workspace using your read-only
-tools (read_file, list_dir, and run_bash for READ-ONLY commands like ls/cat/grep/git status).
-Do NOT modify anything: no file writes and no state-changing commands. When you understand the
-task, STOP calling tools and present a concrete, numbered, step-by-step plan for the user to
-review. Make no changes — the user will approve the plan and switch to auto mode to execute it.`
+tools (read_file, list_dir). You CANNOT modify anything or run commands in this mode. When you
+understand the task, STOP calling tools and present a concrete, numbered, step-by-step plan for
+the user to review. The user will approve it and switch to auto mode to execute.`
 
 // Mode controls the orchestrator's tools and behavior.
 type Mode string
@@ -105,6 +104,9 @@ Be economical: plan and delegate rather than doing the work yourself.
   context_exhausted, error): split the subtask smaller, clarify it, or fix the blocker,
   then delegate again.
 - Plan, delegate, and verify — that is your whole job.
+- NEVER modify cheep's own configuration (the ~/.cheep directory) and NEVER run the "cheep"
+  binary yourself. To run work in parallel, use the delegate tool with multiple tasks — the
+  executors already exist.
 
 When the entire task is verified complete, stop calling tools and give a final summary.`
 
@@ -205,7 +207,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 			nil, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	case ModePlan:
 		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem,
-			append(tool.Make(workdir, false), extraOrch...), cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
+			append(tool.MakeReadOnly(workdir), extraOrch...), cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	}
 
 	// ModeAuto, solo: no executors, the orchestrator does the work itself, so it

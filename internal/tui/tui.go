@@ -13,10 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/TedHaley/cheep/internal/agent"
@@ -59,7 +62,7 @@ type model struct {
 	follow bool
 
 	vp      viewport.Model
-	input   textinput.Model
+	input   textarea.Model
 	sp      spinner.Model
 	w, h    int
 	ready   bool
@@ -92,6 +95,27 @@ var (
 	todoDoneSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 )
+
+// renderMarkdown renders assistant text as styled markdown, bulleted on line 1.
+func renderMarkdown(md string, width int) []string {
+	if width < 20 {
+		width = 80
+	}
+	bullet := bulletSt.Render("●") + " "
+	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(width-2))
+	if err != nil {
+		return []string{bullet + md}
+	}
+	out, err := r.Render(md)
+	if err != nil {
+		return []string{bullet + md}
+	}
+	lines := strings.Split(strings.Trim(out, "\n"), "\n")
+	if len(lines) > 0 {
+		lines[0] = bullet + strings.TrimLeft(lines[0], " ")
+	}
+	return lines
+}
 
 func renderTodos(args map[string]any) []string {
 	ts, _ := args["todos"].([]any)
@@ -130,9 +154,15 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 }
 
 func newModel(cfg config.Config, workdir string, events chan core.Event, extraOrch, extraExec []core.Tool) model {
-	ti := textinput.New()
-	ti.Placeholder = "type a task, or /help"
-	ti.Focus()
+	ta := textarea.New()
+	ta.Placeholder = "type a task, or /help"
+	ta.Prompt = "› "
+	ta.ShowLineNumbers = false
+	ta.SetHeight(1)
+	ta.CharLimit = 0
+	ta.Focus()
+	// Enter submits (handled in Update); these insert a newline instead.
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -152,7 +182,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		},
 		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg)}},
 		byName: map[string]int{"orchestrator": 0, "cheep": 0},
-		input:  ti,
+		input:  ta,
 		sp:     sp,
 		vp:     viewport.New(80, 20),
 	}
@@ -238,19 +268,32 @@ func (m *model) rebuild(keep bool) {
 	m.session = orch.Resume(hist)
 }
 
-func (m model) Init() tea.Cmd { return textinput.Blink }
+func (m model) Init() tea.Cmd { return textarea.Blink }
+
+// relayout sizes the input to its content (1–6 lines) and gives the rest to the log.
+func (m *model) relayout() {
+	lines := strings.Count(m.input.Value(), "\n") + 1
+	if lines < 1 {
+		lines = 1
+	}
+	if lines > 6 {
+		lines = 6
+	}
+	m.input.SetHeight(lines)
+	m.vp.Height = max(3, m.h-4-lines) // tab bar + rule + rule + hint = 4
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.vp.Width = msg.Width
-		m.vp.Height = max(3, msg.Height-5) // tab bar + rule + input + rule + hint
-		m.input.Width = msg.Width - 14
+		m.input.SetWidth(msg.Width - 2)
 		m.ovVP.Width = max(10, msg.Width-6)
 		m.ovVP.Height = max(3, msg.Height-7)
 		m.ovInput.Width = max(10, msg.Width-10)
 		m.ready = true
+		(&m).relayout()
 		(&m).syncViewport()
 		return m, nil
 
@@ -324,11 +367,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				(&m).syncViewport()
 			}
 			return m, nil
-		case "pgup", "up":
+		case "pgup":
 			m.follow = false
 			m.vp, _ = m.vp.Update(msg)
 			return m, nil
-		case "pgdown", "down":
+		case "pgdown":
 			m.vp, _ = m.vp.Update(msg)
 			m.follow = m.vp.AtBottom()
 			return m, nil
@@ -337,6 +380,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		(&m).relayout()
 		return m, cmd
 
 	case tea.MouseMsg:
@@ -360,6 +404,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input.Reset()
+	(&m).relayout()
 	if strings.HasPrefix(text, "/") {
 		return m.slash(text)
 	}
@@ -475,7 +520,9 @@ func (m *model) applyEvent(e core.Event) {
 		}
 	case "text":
 		if e.Text != "" {
-			m.appendLine(idx, bulletSt.Render("●")+" "+e.Text)
+			for _, l := range renderMarkdown(e.Text, m.w) {
+				m.appendLine(idx, l)
+			}
 		}
 	case "tool_call":
 		if e.Tool == "update_todos" {
@@ -525,21 +572,21 @@ func (m model) View() string {
 	if m.overlay != "" {
 		return m.viewOverlay()
 	}
-	m.input.Prompt = modePrompt(m.mode)
-	var hint string
+	var status string
 	if m.running {
 		elapsed := int(time.Since(m.started).Seconds())
 		q := ""
 		if len(m.queue) > 0 {
 			q = fmt.Sprintf(" · %d queued", len(m.queue))
 		}
-		hint = hintSt.Render(fmt.Sprintf("%s %s (%ds · esc to cancel%s)", m.sp.View(), verb(elapsed), elapsed, q))
+		status = hintSt.Render(fmt.Sprintf("%s %s (%ds · esc to cancel%s)", m.sp.View(), verb(elapsed), elapsed, q))
 	} else {
-		hint = hintSt.Render("? for shortcuts")
+		status = hintSt.Render("? for shortcuts")
 		if m.footer != "" {
-			hint = m.footer + "   " + hint
+			status = m.footer + "   " + status
 		}
 	}
+	hint := modeLabel(m.mode) + "   " + status
 	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
 	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), rule, m.input.View(), rule, hint)
 }
@@ -567,7 +614,7 @@ func (m model) tabBar() string {
 	return barSt.Width(m.w).Render(bar)
 }
 
-func modePrompt(mode orchestrator.Mode) string {
+func modeLabel(mode orchestrator.Mode) string {
 	sym, color := "⏵⏵", "220" // auto: yellow
 	switch mode {
 	case orchestrator.ModeChat:
@@ -575,8 +622,7 @@ func modePrompt(mode orchestrator.Mode) string {
 	case orchestrator.ModePlan:
 		sym, color = "⏸", "37" // greenish-blue
 	}
-	label := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(sym + " " + string(mode))
-	return label + " › "
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(sym + " " + string(mode))
 }
 
 func glyph(status string) string {
