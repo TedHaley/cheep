@@ -109,21 +109,25 @@ type execRuntime struct {
 	onEvent    core.EventFunc
 }
 
-func (e execRuntime) newSession(workdir string) *agent.Session {
-	return agent.New("executor:"+e.name, e.provider, e.model, executorSystem,
+func (e execRuntime) newSession(workdir, label string) *agent.Session {
+	return agent.New(label, e.provider, e.model, executorSystem,
 		tool.Make(workdir, true), e.maxTurns, e.budget, e.onEvent).NewSession()
 }
 
 // runSupervised runs the subtask with a wall-clock timeout. If it ends short
 // (timeout, looping, max_turns, context_exhausted), it summarizes the progress
 // and resumes in a fresh session with that handoff, up to maxResumes times.
-func (e execRuntime) runSupervised(parent context.Context, workdir, subtask string) agent.RunResult {
+// label is the executor instance's display name (e.g. "qwen-local#2"); all its
+// events carry it so the UI can group them into one tab.
+func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, label string) agent.RunResult {
+	e.onEvent(core.Event{Agent: label, Type: "lifecycle", Status: "start"})
 	task := subtask
 	var totalIn, totalOut, totalTurns int
+	var r agent.RunResult
 	for attempt := 0; ; attempt++ {
 		ctx, cancel := context.WithTimeout(parent, e.timeout)
-		sess := e.newSession(workdir)
-		r := sess.SendCtx(ctx, task)
+		sess := e.newSession(workdir, label)
+		r = sess.SendCtx(ctx, task)
 		cancel()
 
 		totalIn += r.InputTokens
@@ -134,17 +138,19 @@ func (e execRuntime) runSupervised(parent context.Context, workdir, subtask stri
 		resumable := r.Status == "timeout" || r.Status == "max_turns" ||
 			r.Status == "looping" || r.Status == "context_exhausted"
 		if !resumable || attempt >= e.maxResumes || parent.Err() != nil {
-			return r
+			break
 		}
 
 		sctx, scancel := context.WithTimeout(parent, 60*time.Second)
 		summary := sess.Summarize(sctx)
 		scancel()
-		e.onEvent(core.Event{Agent: "executor:" + e.name, Type: "status",
+		e.onEvent(core.Event{Agent: label, Type: "status",
 			Status: fmt.Sprintf("resuming after %s (attempt %d/%d)", r.Status, attempt+1, e.maxResumes)})
 		task = subtask + "\n\nA previous attempt was interrupted (" + r.Status + ").\n" +
 			"Progress so far:\n" + summary + "\n\nContinue from where it left off and finish the task."
 	}
+	e.onEvent(core.Event{Agent: label, Type: "lifecycle", Status: r.Status})
+	return r
 }
 
 func roster(execs []config.Agent) string {
@@ -243,12 +249,17 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, onEvent c
 				defer wg.Done()
 				rt := runtimes[j.executor]
 
+				gitMu.Lock()
+				counter++
+				id := counter
+				gitMu.Unlock()
+				label := fmt.Sprintf("%s#%d", rt.name, id)
+
 				wd := workdir
 				var tree *worktree.Tree
 				if isolated {
 					gitMu.Lock()
-					counter++
-					t, err := worktree.Add(workdir, rt.name, counter)
+					t, err := worktree.Add(workdir, rt.name, id)
 					gitMu.Unlock()
 					if err == nil {
 						tree, wd = t, t.Path
@@ -258,7 +269,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, onEvent c
 					}
 				}
 
-				r := rt.runSupervised(context.Background(), wd, j.subtask)
+				r := rt.runSupervised(context.Background(), wd, j.subtask, label)
 				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,

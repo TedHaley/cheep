@@ -114,8 +114,16 @@ The interactive shell has three modes, switchable mid-conversation (your history
 - **auto** — full autonomy: plan, delegate to executors, edit, and verify (the default).
 
 Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵⏵ auto`,
-`⏸ plan`, `⏵ chat`). Or use `/chat` `/plan` `/auto` / `/mode`, plus `/setup`, `/config`,
-`/status`, `/clear`, `/help`, `/exit`.
+`⏸ plan`, `⏵ chat`). Or use `/chat` `/plan` `/auto` / `/mode`, plus `/clear`, `/status`,
+`/help`, `/exit`.
+
+### Agent tabs
+
+In a terminal, cheep runs as a full-screen shell with a **tab per agent**: the orchestrator
+plus one for each executor it spawns (with a live status — running `●`, done `✓`, stuck `⚠`,
+error `✗`). Press **Tab** (or `Ctrl+←/→`) to switch agents and watch each one's output;
+`PgUp/PgDn` scrolls. Executor tabs persist until `/clear`. When stdin isn't a terminal
+(pipes/CI), cheep falls back to a simple line-based mode.
 
 ### Configure by chatting
 
