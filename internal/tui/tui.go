@@ -91,7 +91,7 @@ var (
 	bulletSt    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
 	okSt        = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	errSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	userSt      = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("237"))
+	userSt      = lipgloss.NewStyle().Bold(true)
 	todoDoneSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 )
@@ -221,8 +221,22 @@ func welcomeLines(cfg config.Config) []string {
 	if len(cfg.Executors) == 0 {
 		info = append(info, "mode         | solo")
 	}
+	// Collapse interchangeable executors (same model) into one line; the model
+	// picks which instance to use, so the type is what matters.
+	counts := map[string]int{}
+	var order []string
 	for _, e := range cfg.Executors {
-		info = append(info, "executor     | "+e.Model+"  ("+e.Name+")")
+		if counts[e.Model] == 0 {
+			order = append(order, e.Model)
+		}
+		counts[e.Model]++
+	}
+	for _, model := range order {
+		line := "executor     | " + model
+		if counts[model] > 1 {
+			line += fmt.Sprintf("  (×%d)", counts[model])
+		}
+		info = append(info, line)
 	}
 	boxBody := strings.Join(append([]string{
 		lipgloss.NewStyle().Bold(true).Render(">_ cheep " + Version),
@@ -415,7 +429,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if m.running {
 		// Queue it — it runs automatically when the current task finishes.
 		m.queue = append(m.queue, text)
-		(&m).appendLine(0, userSt.Render(" › "+text+" ")+"  "+hintSt.Render("(queued)"))
+		(&m).appendLine(0, userSt.Render("› "+text)+"  "+hintSt.Render("(queued)"))
 		m.active = 0
 		m.follow = true
 		(&m).syncViewport()
@@ -425,7 +439,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m model) startTask(text string) (tea.Model, tea.Cmd) {
-	(&m).appendLine(0, userSt.Render(" › "+text+" "))
+	(&m).appendLine(0, userSt.Render("› "+text))
 	m.tabs[0].status = "run"
 	m.active = 0
 	m.follow = true
