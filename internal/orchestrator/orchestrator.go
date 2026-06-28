@@ -181,9 +181,10 @@ func roster(execs []config.Agent) string {
 // Build returns the orchestrator agent for the given config and workspace.
 // When isolate is true and workdir is a git repo, each parallel subtask runs in
 // its own worktree and its changes are merged back automatically.
-// Build returns the orchestrator agent. extra holds tools discovered at runtime
-// (e.g. MCP) to add to the orchestrator and every executor.
-func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extra []core.Tool, onEvent core.EventFunc) (*agent.Agent, error) {
+// Build returns the orchestrator agent. extraOrch/extraExec hold tools
+// discovered at runtime (e.g. MCP), added to the orchestrator and executors
+// respectively. In solo mode the agent gets both.
+func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch, extraExec []core.Tool, onEvent core.EventFunc) (*agent.Agent, error) {
 	if cfg.Orchestrator.Provider == "anthropic" && cfg.Orchestrator.APIKey == "" {
 		return nil, fmt.Errorf("orchestrator has no API key (set ANTHROPIC_API_KEY or run /config)")
 	}
@@ -204,13 +205,16 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extra []c
 			nil, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	case ModePlan:
 		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem,
-			append(tool.Make(workdir, false), extra...), cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
+			append(tool.Make(workdir, false), extraOrch...), cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	}
 
-	// ModeAuto, solo: no executors, the orchestrator does the work itself.
+	// ModeAuto, solo: no executors, the orchestrator does the work itself, so it
+	// gets both role's tools.
 	if len(cfg.Executors) == 0 {
+		soloTools := append(tool.Make(workdir, true), extraOrch...)
+		soloTools = append(soloTools, extraExec...)
 		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
-			append(tool.Make(workdir, true), extra...), cfg.Orchestrator.MaxTurns, 0, onEvent)
+			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		return solo, nil
 	}
@@ -226,7 +230,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extra []c
 			budget:     e.TokenBudget,
 			timeout:    time.Duration(e.TimeoutSeconds) * time.Second,
 			maxResumes: e.MaxResumes,
-			extra:      extra,
+			extra:      extraExec,
 			onEvent:    onEvent,
 		}
 		order = append(order, e.Name)
@@ -365,7 +369,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extra []c
 			"follow-up subtask (or resolve it yourself with git) before continuing."
 	}
 	tools := append(tool.Make(workdir, false), delegateTool)
-	tools = append(tools, extra...)
+	tools = append(tools, extraOrch...)
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
 		cfg.Orchestrator.MaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget

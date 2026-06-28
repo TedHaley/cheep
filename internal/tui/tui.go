@@ -44,13 +44,14 @@ type tab struct {
 }
 
 type model struct {
-	cfg      config.Config
-	workdir  string
-	mode     orchestrator.Mode
-	extra    []core.Tool
-	onEvent  core.EventFunc
-	session  *agent.Session
-	buildErr error
+	cfg       config.Config
+	workdir   string
+	mode      orchestrator.Mode
+	extraOrch []core.Tool
+	extraExec []core.Tool
+	onEvent   core.EventFunc
+	session   *agent.Session
+	buildErr  error
 
 	tabs   []*tab
 	byName map[string]int
@@ -114,10 +115,10 @@ func renderTodos(args map[string]any) []string {
 var Version = "dev"
 
 // Run starts the full-screen shell.
-func Run(cfg config.Config, workdir, version string, extra []core.Tool) error {
+func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core.Tool) error {
 	Version = version
 	events := make(chan core.Event, 1024)
-	m := newModel(cfg, workdir, events, extra)
+	m := newModel(cfg, workdir, events, extraOrch, extraExec)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	go func() {
 		for e := range events {
@@ -128,7 +129,7 @@ func Run(cfg config.Config, workdir, version string, extra []core.Tool) error {
 	return err
 }
 
-func newModel(cfg config.Config, workdir string, events chan core.Event, extra []core.Tool) model {
+func newModel(cfg config.Config, workdir string, events chan core.Event, extraOrch, extraExec []core.Tool) model {
 	ti := textinput.New()
 	ti.Placeholder = "type a task, or /help"
 	ti.Focus()
@@ -137,11 +138,12 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extra [
 	sp.Spinner = spinner.Dot
 
 	m := model{
-		cfg:     cfg,
-		workdir: workdir,
-		mode:    orchestrator.ModeAuto,
-		extra:   extra,
-		follow:  true,
+		cfg:       cfg,
+		workdir:   workdir,
+		mode:      orchestrator.ModeAuto,
+		extraOrch: extraOrch,
+		extraExec: extraExec,
+		follow:    true,
 		onEvent: func(e core.Event) {
 			select {
 			case events <- e:
@@ -227,7 +229,7 @@ func (m *model) rebuild(keep bool) {
 	if keep && m.session != nil {
 		hist = m.session.History()
 	}
-	orch, err := orchestrator.Build(m.cfg, m.workdir, true, m.mode, m.extra, m.onEvent)
+	orch, err := orchestrator.Build(m.cfg, m.workdir, true, m.mode, m.extraOrch, m.extraExec, m.onEvent)
 	m.buildErr = err
 	if err != nil {
 		m.session = nil

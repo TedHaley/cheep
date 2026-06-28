@@ -140,18 +140,21 @@ setup › add an executor named local-2 at http://127.0.0.1:1234
 `core.Tool{Name, Description, Parameters (JSON Schema), Func}`; append one there and it's
 available to every agent — no other changes needed.
 
-**MCP servers** (stdio) plug in via the `mcp` section of `~/.cheep/config.json`. cheep
-launches each server, lists its tools, and exposes them to the orchestrator and executors as
-`<server>__<tool>`:
+**MCP servers** plug in via the `mcp` section of `~/.cheep/config.json`. cheep launches each
+server, lists its tools, and exposes them as `<server>__<tool>`. Both **stdio** (`command`)
+and **HTTP** (`url`, Streamable HTTP / SSE) transports are supported, and each server can be
+scoped to specific roles with `roles` (`"orchestrator"`, `"executor"`; default both):
 
 ```json
 "mcp": {
-  "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"] }
+  "fs":     { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"],
+              "roles": ["executor"] },
+  "github": { "url": "https://api.example.com/mcp", "headers": { "Authorization": "Bearer …" } }
 }
 ```
 
 On launch you'll see `mcp "fs": N tool(s)`. A failed server is reported and skipped — cheep
-still runs. (stdio transport for now; HTTP/SSE is a future addition.)
+still runs.
 
 ## How it works
 

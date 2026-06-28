@@ -116,32 +116,31 @@ func ensureConfig() config.Config {
 
 // ---- interactive shell ----------------------------------------------------
 
-// startMCP launches configured MCP servers and returns their tools + a session
-// to close on exit. Errors are reported but never fatal.
-func startMCP(cfg config.Config) ([]core.Tool, *mcp.Session) {
-	tools, sess := mcp.Start(cfg.MCP, func(e core.Event) {
+// startMCP launches configured MCP servers and returns their role-scoped tools +
+// a session to close on exit. Errors are reported but never fatal.
+func startMCP(cfg config.Config) (mcp.Tools, *mcp.Session) {
+	return mcp.Start(cfg.MCP, func(e core.Event) {
 		fmt.Fprintf(os.Stderr, "%s%s%s\n", cDim, e.Status, cReset)
 	})
-	return tools, sess
 }
 
 func cmdChat() {
 	cfg := ensureConfig()
 	workdir, _ := os.Getwd()
-	extra, mcpSess := startMCP(cfg)
+	mt, mcpSess := startMCP(cfg)
 	defer mcpSess.Close()
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		if err := tui.Run(cfg, workdir, version, extra); err != nil {
+		if err := tui.Run(cfg, workdir, version, mt.Orchestrator, mt.Executor); err != nil {
 			fatal(err)
 		}
 		return
 	}
-	lineREPL(cfg, workdir, extra)
+	lineREPL(cfg, workdir, mt.Orchestrator, mt.Executor)
 }
 
 // lineREPL is the non-interactive fallback (piped stdin / no TTY): a simple
 // line-based loop with slash commands. The rich tabbed view is in package tui.
-func lineREPL(cfg config.Config, workdir string, extra []core.Tool) {
+func lineREPL(cfg config.Config, workdir string, extraOrch, extraExec []core.Tool) {
 	onEvent := printer()
 	mode := orchestrator.ModeAuto
 	var session *agent.Session
@@ -151,7 +150,7 @@ func lineREPL(cfg config.Config, workdir string, extra []core.Tool) {
 		if keepHistory && session != nil {
 			hist = session.History()
 		}
-		orch, err := orchestrator.Build(cfg, workdir, true, mode, extra, onEvent)
+		orch, err := orchestrator.Build(cfg, workdir, true, mode, extraOrch, extraExec, onEvent)
 		buildErr = err
 		if err != nil {
 			session = nil
@@ -502,9 +501,9 @@ func cmdRun(argv []string) {
 	}
 
 	cfg := ensureConfig()
-	extra, mcpSess := startMCP(cfg)
+	mt, mcpSess := startMCP(cfg)
 	defer mcpSess.Close()
-	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, extra, printer())
+	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, mt.Orchestrator, mt.Executor, printer())
 	if err != nil {
 		fatal(err)
 	}
