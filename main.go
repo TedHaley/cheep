@@ -17,6 +17,7 @@ import (
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/mcp"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tui"
@@ -115,21 +116,32 @@ func ensureConfig() config.Config {
 
 // ---- interactive shell ----------------------------------------------------
 
+// startMCP launches configured MCP servers and returns their tools + a session
+// to close on exit. Errors are reported but never fatal.
+func startMCP(cfg config.Config) ([]core.Tool, *mcp.Session) {
+	tools, sess := mcp.Start(cfg.MCP, func(e core.Event) {
+		fmt.Fprintf(os.Stderr, "%s%s%s\n", cDim, e.Status, cReset)
+	})
+	return tools, sess
+}
+
 func cmdChat() {
 	cfg := ensureConfig()
 	workdir, _ := os.Getwd()
+	extra, mcpSess := startMCP(cfg)
+	defer mcpSess.Close()
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		if err := tui.Run(cfg, workdir, version); err != nil {
+		if err := tui.Run(cfg, workdir, version, extra); err != nil {
 			fatal(err)
 		}
 		return
 	}
-	lineREPL(cfg, workdir)
+	lineREPL(cfg, workdir, extra)
 }
 
 // lineREPL is the non-interactive fallback (piped stdin / no TTY): a simple
 // line-based loop with slash commands. The rich tabbed view is in package tui.
-func lineREPL(cfg config.Config, workdir string) {
+func lineREPL(cfg config.Config, workdir string, extra []core.Tool) {
 	onEvent := printer()
 	mode := orchestrator.ModeAuto
 	var session *agent.Session
@@ -139,7 +151,7 @@ func lineREPL(cfg config.Config, workdir string) {
 		if keepHistory && session != nil {
 			hist = session.History()
 		}
-		orch, err := orchestrator.Build(cfg, workdir, true, mode, onEvent)
+		orch, err := orchestrator.Build(cfg, workdir, true, mode, extra, onEvent)
 		buildErr = err
 		if err != nil {
 			session = nil
@@ -490,7 +502,9 @@ func cmdRun(argv []string) {
 	}
 
 	cfg := ensureConfig()
-	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, printer())
+	extra, mcpSess := startMCP(cfg)
+	defer mcpSess.Close()
+	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, extra, printer())
 	if err != nil {
 		fatal(err)
 	}

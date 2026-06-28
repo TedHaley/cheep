@@ -134,6 +134,25 @@ language — the working agent probes endpoints, detects models, and writes the 
 setup › add an executor named local-2 at http://127.0.0.1:1234
 ```
 
+## Tools & MCP
+
+**Built-in tools** live in `internal/tool/tool.go` (`Make()`). A tool is a
+`core.Tool{Name, Description, Parameters (JSON Schema), Func}`; append one there and it's
+available to every agent — no other changes needed.
+
+**MCP servers** (stdio) plug in via the `mcp` section of `~/.cheep/config.json`. cheep
+launches each server, lists its tools, and exposes them to the orchestrator and executors as
+`<server>__<tool>`:
+
+```json
+"mcp": {
+  "fs": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"] }
+}
+```
+
+On launch you'll see `mcp "fs": N tool(s)`. A failed server is reported and skipped — cheep
+still runs. (stdio transport for now; HTTP/SSE is a future addition.)
+
 ## How it works
 
 ```

@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/TedHaley/cheep/internal/mcp"
 )
 
 // Agent describes one model endpoint (orchestrator or executor).
@@ -34,8 +36,9 @@ type Agent struct {
 }
 
 type Config struct {
-	Orchestrator Agent   `json:"orchestrator"`
-	Executors    []Agent `json:"executors"`
+	Orchestrator Agent                 `json:"orchestrator"`
+	Executors    []Agent               `json:"executors"`
+	MCP          map[string]mcp.Server `json:"mcp,omitempty"` // name -> stdio MCP server
 }
 
 // Home is cheep's root directory (~/.cheep by default; override with CHEEP_HOME).
