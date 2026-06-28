@@ -76,6 +76,15 @@ type Session struct {
 
 func (a *Agent) NewSession() *Session { return &Session{a: a} }
 
+// Resume continues a conversation from prior history (e.g. after a mode switch
+// that rebuilt the agent with a different tool set).
+func (a *Agent) Resume(history []core.Message) *Session {
+	return &Session{a: a, messages: append([]core.Message{}, history...)}
+}
+
+// History returns the conversation so far.
+func (s *Session) History() []core.Message { return s.messages }
+
 // Send runs a turn with no deadline.
 func (s *Session) Send(userText string) RunResult {
 	return s.SendCtx(context.Background(), userText)

@@ -35,6 +35,35 @@ directly using your tools (read_file, write_file, list_dir, run_bash). Plan brie
 changes, and verify them (read files back, run tests/commands). When the task is done, stop
 calling tools and give a short summary of what you did and how to verify it.`
 
+const chatSystem = `You are cheep in CHAT MODE. You have no tools and make no changes to the
+workspace. Discuss, brainstorm, explain, and help the user think through their project and
+tasks. If they want you to investigate the code, suggest switching to plan mode; if they want
+work done, suggest auto mode.`
+
+const planSystem = `You are cheep in PLAN MODE. Investigate the workspace using your read-only
+tools (read_file, list_dir, and run_bash for READ-ONLY commands like ls/cat/grep/git status).
+Do NOT modify anything: no file writes and no state-changing commands. When you understand the
+task, STOP calling tools and present a concrete, numbered, step-by-step plan for the user to
+review. Make no changes — the user will approve the plan and switch to auto mode to execute it.`
+
+// Mode controls the orchestrator's tools and behavior.
+type Mode string
+
+const (
+	ModeChat Mode = "chat" // conversation only, no tools
+	ModePlan Mode = "plan" // read-only investigation, produces a plan
+	ModeAuto Mode = "auto" // full autonomy (delegate / edit), today's behavior
+)
+
+// ParseMode returns the mode for a name, or false if unknown.
+func ParseMode(s string) (Mode, bool) {
+	switch Mode(s) {
+	case ModeChat, ModePlan, ModeAuto:
+		return Mode(s), true
+	}
+	return "", false
+}
+
 const orchestratorSystemTmpl = `You are the orchestrator. You coordinate a fleet of cheaper
 executor agents to accomplish the user's task. You are expensive; the executors are cheap.
 Be economical: plan and delegate rather than doing the work yourself.
@@ -122,7 +151,7 @@ func roster(execs []config.Agent) string {
 // Build returns the orchestrator agent for the given config and workspace.
 // When isolate is true and workdir is a git repo, each parallel subtask runs in
 // its own worktree and its changes are merged back automatically.
-func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFunc) (*agent.Agent, error) {
+func Build(cfg config.Config, workdir string, isolate bool, mode Mode, onEvent core.EventFunc) (*agent.Agent, error) {
 	if cfg.Orchestrator.Provider == "anthropic" && cfg.Orchestrator.APIKey == "" {
 		return nil, fmt.Errorf("orchestrator has no API key (set ANTHROPIC_API_KEY or run /config)")
 	}
@@ -131,7 +160,22 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 	}
 	orchProv := provider.For(cfg.Orchestrator.Provider, cfg.Orchestrator.Endpoint, cfg.Orchestrator.APIKey, 4096)
 
-	// Solo mode: no executors, the orchestrator does the work itself.
+	withBudget := func(a *agent.Agent) *agent.Agent {
+		a.CompactBudget = cfg.Orchestrator.ContextBudget
+		return a
+	}
+
+	// Chat: no tools. Plan: read-only investigation, no edits/delegation.
+	switch mode {
+	case ModeChat:
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, chatSystem,
+			nil, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
+	case ModePlan:
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem,
+			tool.Make(workdir, false), cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
+	}
+
+	// ModeAuto, solo: no executors, the orchestrator does the work itself.
 	if len(cfg.Executors) == 0 {
 		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
 			tool.Make(workdir, true), cfg.Orchestrator.MaxTurns, 0, onEvent)

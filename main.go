@@ -15,6 +15,7 @@ import (
 
 	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/config"
+	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/provider"
@@ -26,6 +27,7 @@ var version = "dev"
 
 const (
 	cReset  = "\033[0m"
+	cBold   = "\033[1m"
 	cCyan   = "\033[1;36m"
 	cGreen  = "\033[1;32m"
 	cYellow = "\033[33m"
@@ -54,6 +56,8 @@ func main() {
 		cmdCheck()
 	case "config":
 		cmdConfig(os.Args[2:])
+	case "setup":
+		cmdSetup()
 	case "keys":
 		cmdKeys()
 	case "version", "-v", "--version":
@@ -74,7 +78,8 @@ Usage:
   cheep                          start the interactive shell (default)
   cheep run "<task>" [--workdir] run a single task non-interactively
   cheep check                    ping the orchestrator and every executor
-  cheep config [show|path]       set up or inspect your agents
+  cheep config [show|path]       set up or inspect your agents (manual wizard)
+  cheep setup                    configure agents by chatting with a working one
   cheep keys                     show the key store (~/.cheep/keys.env)
   cheep version                  print the version
 
@@ -112,27 +117,40 @@ func cmdChat() {
 	workdir, _ := os.Getwd()
 	onEvent := printer()
 
+	mode := orchestrator.ModeAuto
+	var session *agent.Session
 	var buildErr error
-	makeSession := func() *agent.Session {
-		orch, err := orchestrator.Build(cfg, workdir, true, onEvent)
+	// rebuild the orchestrator for the current cfg+mode, carrying the conversation.
+	rebuild := func(keepHistory bool) {
+		var hist []core.Message
+		if keepHistory && session != nil {
+			hist = session.History()
+		}
+		orch, err := orchestrator.Build(cfg, workdir, true, mode, onEvent)
 		buildErr = err
 		if err != nil {
-			return nil
+			session = nil
+			return
 		}
-		return orch.NewSession()
+		session = orch.Resume(hist)
+	}
+	setMode := func(m orchestrator.Mode) {
+		mode = m
+		rebuild(true)
+		fmt.Printf("%smode: %s%s\n", cDim, mode, cReset)
 	}
 
 	fmt.Printf("%s%s%s\n", cCyan, bannerArt, cReset)
 	printStatus(cfg, workdir)
 
-	session := makeSession()
+	rebuild(false)
 	if buildErr != nil {
 		fmt.Printf("%s%v%s\n", cYellow, buildErr, cReset)
 	}
-	fmt.Printf("%sType a task, or /help for commands. Ctrl-D or /exit to quit.%s\n", cDim, cReset)
+	fmt.Printf("%sChat / plan / auto modes. Type a task, or /help for commands. Ctrl-D or /exit to quit.%s\n", cDim, cReset)
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Print("\n› ")
+		fmt.Printf("\n%s%s ›%s ", cBold, mode, cReset)
 		line, err := in.ReadString('\n')
 		if err != nil { // EOF / Ctrl-D
 			fmt.Println()
@@ -149,12 +167,33 @@ func cmdChat() {
 				return
 			case "/help", "/?":
 				fmt.Print(`commands:
-  /config    reconfigure agents (orchestrator + executors)
-  /status    show the current setup
-  /clear     start a fresh conversation
-  /help      this help
-  /exit      quit
+  /chat /plan /auto   switch mode (talk · investigate+plan · do the work)
+  /mode               cycle chat → plan → auto
+  /setup              configure the other service by chatting with a working one
+  /config             run the manual setup wizard
+  /status             show the current setup
+  /clear              start a fresh conversation
+  /help               this help
+  /exit               quit
 `)
+			case "/chat":
+				setMode(orchestrator.ModeChat)
+			case "/plan":
+				setMode(orchestrator.ModePlan)
+			case "/auto":
+				setMode(orchestrator.ModeAuto)
+			case "/mode":
+				setMode(map[orchestrator.Mode]orchestrator.Mode{
+					orchestrator.ModeChat: orchestrator.ModePlan,
+					orchestrator.ModePlan: orchestrator.ModeAuto,
+					orchestrator.ModeAuto: orchestrator.ModeChat,
+				}[mode])
+			case "/setup":
+				if c, ok := runSetupAssistant(cfg, in); ok {
+					cfg = c
+					rebuild(true)
+					printStatus(cfg, workdir)
+				}
 			case "/status":
 				printStatus(cfg, workdir)
 			case "/config":
@@ -162,11 +201,12 @@ func cmdChat() {
 					fmt.Printf("%sconfig: %v%s\n", cRed, err, cReset)
 				} else {
 					cfg = c
-					session = makeSession()
+					rebuild(true)
 					printStatus(cfg, workdir)
 				}
 			case "/clear":
-				session = makeSession()
+				session = nil
+				rebuild(false)
 				fmt.Printf("%s(new conversation)%s\n", cDim, cReset)
 			default:
 				fmt.Printf("%sunknown command %q — try /help%s\n", cYellow, fields[0], cReset)
@@ -179,8 +219,8 @@ func cmdChat() {
 			continue
 		}
 		r := session.Send(line)
-		fmt.Printf("%s[%s · %d turns · %d→%d tokens]%s\n",
-			cDim, r.Status, r.Turns, r.InputTokens, r.OutputTokens, cReset)
+		fmt.Printf("%s[%s · %s · %d turns · %d→%d tokens]%s\n",
+			cDim, mode, r.Status, r.Turns, r.InputTokens, r.OutputTokens, cReset)
 	}
 }
 
@@ -361,6 +401,64 @@ func cmdConfig(argv []string) {
 	}
 }
 
+// ---- setup assistant ------------------------------------------------------
+
+// runSetupAssistant lets the user chat with a reachable agent to configure the
+// others. Returns the (reloaded) config and whether it was saved.
+func runSetupAssistant(cfg config.Config, in *bufio.Reader) (config.Config, bool) {
+	asst, st, label, err := configassist.Build(cfg, printer())
+	if err != nil {
+		fmt.Printf("%s%v%s\n", cYellow, err, cReset)
+		return cfg, false
+	}
+	fmt.Printf("%sSetup assistant (powered by %s). Describe what to configure; /done when finished, /cancel to abort.%s\n",
+		cDim, label, cReset)
+	session := asst.NewSession()
+	for {
+		fmt.Print("\nsetup › ")
+		line, err := in.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimSpace(line)
+		switch line {
+		case "":
+			continue
+		case "/done", "/exit":
+			goto finish
+		case "/cancel":
+			return cfg, false
+		}
+		r := session.Send(line)
+		fmt.Printf("%s[%s · %d turns]%s\n", cDim, r.Status, r.Turns, cReset)
+	}
+finish:
+	if !st.Saved {
+		fmt.Printf("%s(nothing saved)%s\n", cDim, cReset)
+		return cfg, false
+	}
+	updated, err := config.Load()
+	if err != nil {
+		return st.Cfg, true
+	}
+	return updated, true
+}
+
+func cmdSetup() {
+	if !config.Exists() {
+		fmt.Println("Configure your first agent with `cheep config`; then `cheep setup` can help add the rest.")
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		fatal(err)
+	}
+	in := bufio.NewReader(os.Stdin)
+	if _, ok := runSetupAssistant(cfg, in); ok {
+		fmt.Printf("%s✓ configuration updated%s\n", cGreen, cReset)
+	}
+}
+
 // ---- keys -----------------------------------------------------------------
 
 func cmdKeys() {
@@ -387,7 +485,7 @@ func cmdRun(argv []string) {
 	}
 
 	cfg := ensureConfig()
-	orch, err := orchestrator.Build(cfg, *workdir, *isolate, printer())
+	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, printer())
 	if err != nil {
 		fatal(err)
 	}

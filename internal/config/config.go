@@ -228,16 +228,16 @@ func (c *Config) ApplyDefaults() {
 }
 
 func Save(c Config) error {
-	d, err := Dir()
+	p, err := Path()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(d, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(d, "config.json"), b, 0o600)
+	return os.WriteFile(p, b, 0o600)
 }

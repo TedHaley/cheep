@@ -97,12 +97,33 @@ cheep check               # pings the orchestrator and every executor
 
 | Command | What it does |
 |---|---|
-| `cheep` | Start the interactive shell (slash commands: `/config`, `/status`, `/clear`, `/help`, `/exit`) |
+| `cheep` | Start the interactive shell |
 | `cheep run "<task>" [--workdir DIR]` | Run a single task non-interactively |
 | `cheep check` | Ping the orchestrator and every executor |
-| `cheep config [show\|path]` | Set up or inspect your agents |
+| `cheep config [show\|path]` | Set up or inspect your agents (manual wizard) |
+| `cheep setup` | Configure agents by chatting with a working one |
 | `cheep keys` | Show/create the key store |
 | `cheep version` | Print the version |
+
+### Modes
+
+The interactive shell has three modes, switchable mid-conversation (your history carries over):
+
+- **chat** — talk only, no tools, no changes.
+- **plan** — read-only investigation; produces a step-by-step plan for you to approve.
+- **auto** — full autonomy: plan, delegate to executors, edit, and verify (the default).
+
+Slash commands: `/chat` `/plan` `/auto` (or `/mode` to cycle), plus `/setup`, `/config`,
+`/status`, `/clear`, `/help`, `/exit`.
+
+### Configure by chatting
+
+Once one agent is reachable, `cheep setup` (or `/setup`) lets you configure the rest in plain
+language — the working agent probes endpoints, detects models, and writes the config for you:
+
+```
+setup › add an executor named local-2 at http://127.0.0.1:1234
+```
 
 ## How it works
 
