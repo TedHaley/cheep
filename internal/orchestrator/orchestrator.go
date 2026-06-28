@@ -210,15 +210,44 @@ func roster(execs []config.Agent) string {
 // Build returns the orchestrator agent for the given config and workspace.
 // When isolate is true and workdir is a git repo, each parallel subtask runs in
 // its own worktree and its changes are merged back automatically.
+const rescueSystem = `cheep's configured orchestrator is unavailable (missing API key or
+unreachable), so you are a temporary helper running on an executor model. Your only job right
+now is to help the user fix the orchestrator using the config tools: get_config to show the
+setup, discover_models to check an endpoint, and set_orchestrator to set it. For Claude use
+provider="anthropic", model="claude-sonnet-4-6", and tell the user to put ANTHROPIC_API_KEY
+in ~/.cheep/keys.env and restart cheep. For a local model use provider="openai" with the
+endpoint. Keep replies short and do the change via the tools.`
+
+// usable reports whether an agent can actually run.
+func usable(a config.Agent) bool {
+	return a.Model != "" && !(a.Provider == "anthropic" && a.APIKey == "")
+}
+
+// rescueAgent builds a config-only helper from the first usable executor.
+func rescueAgent(cfg config.Config, onEvent core.EventFunc) *agent.Agent {
+	for _, e := range cfg.Executors {
+		if usable(e) {
+			prov := provider.For(e.Provider, e.Endpoint, e.APIKey, 4096)
+			return agent.New("orchestrator", prov, e.Model, rescueSystem, configtools.Tools(), 20, 0, onEvent)
+		}
+	}
+	return nil
+}
+
 // Build returns the orchestrator agent. extraOrch/extraExec hold tools
 // discovered at runtime (e.g. MCP), added to the orchestrator and executors
 // respectively. In solo mode the agent gets both.
 func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch, extraExec []core.Tool, onEvent core.EventFunc) (*agent.Agent, error) {
-	if cfg.Orchestrator.Provider == "anthropic" && cfg.Orchestrator.APIKey == "" {
+	// If the orchestrator can't run (no key / no model), fall back to a reachable
+	// executor so the user can fix the orchestrator config conversationally.
+	if !usable(cfg.Orchestrator) {
+		if r := rescueAgent(cfg, onEvent); r != nil {
+			return r, nil
+		}
+		if cfg.Orchestrator.Model == "" {
+			return nil, fmt.Errorf("orchestrator has no model set (run /config)")
+		}
 		return nil, fmt.Errorf("orchestrator has no API key (set ANTHROPIC_API_KEY or run /config)")
-	}
-	if cfg.Orchestrator.Model == "" {
-		return nil, fmt.Errorf("orchestrator has no model set (run /config)")
 	}
 	orchProv := provider.For(cfg.Orchestrator.Provider, cfg.Orchestrator.Endpoint, cfg.Orchestrator.APIKey, 4096)
 

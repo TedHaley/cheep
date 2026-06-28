@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -88,6 +89,9 @@ type model struct {
 	keepTabs  bool // keep finished executor tabs (else auto-close at turn end)
 
 	pendingCfg config.Config // last config we tried to switch to (avoid re-verifying)
+
+	connectivity map[string]string // label -> "ok"/"unreachable"/"needs API key"
+	welcomeLen   int               // length of the initial banner block (for refresh)
 
 	usage      map[string][2]int // model -> {input, output} tokens this session
 	usageOrder []string          // models in first-seen order
@@ -270,7 +274,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 			default: // drop rather than block an agent if the UI falls behind
 			}
 		},
-		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg)}},
+		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg, nil)}},
 		byName:    map[string]int{"orchestrator": 0, "cheep": 0},
 		usage:     map[string][2]int{},
 		usageRole: map[string][2]int{},
@@ -278,6 +282,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		sp:     sp,
 		vp:     viewport.New(80, 20),
 	}
+	m.welcomeLen = len(m.tabs[0].lines)
 	(&m).rebuild(false)
 	if m.buildErr != nil {
 		m.tabs[0].lines = append(m.tabs[0].lines,
@@ -311,9 +316,16 @@ func gradientBanner() []string {
 }
 
 // welcomeLines renders the banner beside a bordered config box as the
-// orchestrator tab's opening content (it scrolls away as you work).
-func welcomeLines(cfg config.Config) []string {
-	info := []string{"orchestrator | " + cfg.Orchestrator.Model}
+// orchestrator tab's opening content (it scrolls away as you work). conn maps a
+// label ("orchestrator" / "exec:<name>") to a connectivity status.
+func welcomeLines(cfg config.Config, conn map[string]string) []string {
+	mark := func(label, base string) string {
+		if s := conn[label]; s != "" && s != "ok" {
+			return base + "  " + errSt.Render("✗ "+s)
+		}
+		return base
+	}
+	info := []string{"orchestrator | " + mark("orchestrator", cfg.Orchestrator.Model)}
 	if len(cfg.Executors) == 0 {
 		info = append(info, "mode         | solo")
 	}
@@ -321,14 +333,16 @@ func welcomeLines(cfg config.Config) []string {
 	// picks which instance to use, so the type is what matters.
 	counts := map[string]int{}
 	var order []string
+	first := map[string]string{}
 	for _, e := range cfg.Executors {
 		if counts[e.Model] == 0 {
 			order = append(order, e.Model)
+			first[e.Model] = e.Name
 		}
 		counts[e.Model]++
 	}
 	for _, model := range order {
-		info = append(info, "executor     | "+model)
+		info = append(info, "executor     | "+mark("exec:"+first[model], model))
 	}
 	boxBody := strings.Join(append([]string{
 		lipgloss.NewStyle().Bold(true).Render(">_ cheep " + Version),
@@ -374,7 +388,47 @@ func (m *model) rebuild(keep bool) {
 	m.session = orch.Resume(hist)
 }
 
-func (m model) Init() tea.Cmd { return textarea.Blink }
+func (m model) Init() tea.Cmd { return tea.Batch(textarea.Blink, probeCmd(m.cfg)) }
+
+type probeMsg map[string]string
+
+// probeCmd pings every configured agent so the banner can show connectivity.
+func probeCmd(cfg config.Config) tea.Cmd {
+	return func() tea.Msg {
+		res := map[string]string{}
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		check := func(label string, a config.Agent) {
+			defer wg.Done()
+			st := "ok"
+			switch {
+			case a.Model == "":
+				st = "no model"
+			case a.Provider == "anthropic" && a.APIKey == "":
+				st = "needs API key"
+			default:
+				p := provider.For(a.Provider, a.Endpoint, a.APIKey, 16)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_, err := p.Complete(ctx, a.Model, "ok", []core.Message{{Role: "user", Text: "ok"}}, nil)
+				cancel()
+				if err != nil {
+					st = "unreachable"
+				}
+			}
+			mu.Lock()
+			res[label] = st
+			mu.Unlock()
+		}
+		wg.Add(1)
+		go check("orchestrator", cfg.Orchestrator)
+		for _, e := range cfg.Executors {
+			wg.Add(1)
+			go check("exec:"+e.Name, e)
+		}
+		wg.Wait()
+		return probeMsg(res)
+	}
+}
 
 // relayout sizes the input to its content (1–6 lines) and gives the rest to the log.
 func (m *model) relayout() {
@@ -453,13 +507,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ovBusy = false
 		return m, nil
 
+	case probeMsg:
+		m.connectivity = map[string]string(msg)
+		if len(m.tabs) > 0 && len(m.tabs[0].lines) == m.welcomeLen { // banner untouched
+			m.tabs[0].lines = welcomeLines(m.cfg, m.connectivity)
+			m.welcomeLen = len(m.tabs[0].lines)
+			(&m).syncViewport()
+		}
+		return m, nil
+
 	case switchMsg:
 		if msg.ok {
 			m.cfg = msg.cfg
 			m.keepTabs = msg.cfg.KeepTabs
 			(&m).rebuild(true) // new providers, conversation preserved
 			(&m).appendLine(0, "")
-			for _, l := range welcomeLines(msg.cfg) { // re-show banner with new models
+			for _, l := range welcomeLines(msg.cfg, m.connectivity) { // re-show banner with new models
 				(&m).appendLine(0, l)
 			}
 			m.footer = "✓ switched orchestrator to " + msg.cfg.Orchestrator.Model
@@ -645,7 +708,8 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 			m.footer = "keep-tabs OFF — finished executor tabs auto-close at turn end"
 		}
 	case "/clear":
-		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg)}}
+		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg, m.connectivity)}}
+		m.welcomeLen = len(m.tabs[0].lines)
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
 		m.active = 0
 		(&m).rebuild(false)
