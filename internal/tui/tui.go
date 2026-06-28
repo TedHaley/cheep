@@ -72,6 +72,10 @@ type model struct {
 	queue   []string // messages typed while a task is running
 	footer  string
 
+	openTodos int  // non-done todos from the orchestrator's latest update_todos
+	delegated bool // did the orchestrator call delegate this run?
+	nudges    int  // auto-continue count since the last user message
+
 	// overlay: "" (none) | "help" | "setup"
 	overlay string
 	ovTitle string
@@ -319,9 +323,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabs[0].status = statusKey(msg.r.Status)
 		m.footer = fmt.Sprintf("%s · %d turns · %d→%d tokens", msg.r.Status, msg.r.Turns, msg.r.InputTokens, msg.r.OutputTokens)
 		(&m).syncViewport()
+		// Backstop: orchestrator stopped with unfinished todos and never delegated.
+		if m.mode == orchestrator.ModeAuto && len(m.cfg.Executors) > 0 &&
+			msg.r.Status == "completed" && m.openTodos > 0 && !m.delegated && m.nudges < 2 {
+			m.nudges++
+			nudge := "You stopped, but there are unfinished todos and you did not call the " +
+				"delegate tool. Use delegate now to run the open items in parallel across the " +
+				"executors, then verify the results. Act — do not just describe."
+			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: finishing open todos"))
+		}
 		if len(m.queue) > 0 { // run the next queued message
 			next := m.queue[0]
 			m.queue = m.queue[1:]
+			m.nudges, m.openTodos = 0, 0
 			return m.startTask(next)
 		}
 		return m, nil
@@ -433,15 +447,23 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		(&m).syncViewport()
 		return m, nil
 	}
+	m.nudges = 0
+	m.openTodos = 0
 	return m.startTask(text)
 }
 
 func (m model) startTask(text string) (tea.Model, tea.Cmd) {
-	(&m).appendLine(0, userSt.Render("› "+text))
+	return m.runMessage(text, userSt.Render("› "+text))
+}
+
+// runMessage sends text to the orchestrator, showing `display` in the log.
+func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
+	(&m).appendLine(0, display)
 	m.tabs[0].status = "run"
 	m.active = 0
 	m.follow = true
 	m.running = true
+	m.delegated = false
 	m.started = time.Now()
 	(&m).syncViewport()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -449,6 +471,18 @@ func (m model) startTask(text string) (tea.Model, tea.Cmd) {
 	s := m.session
 	run := func() tea.Msg { return doneMsg{s.SendCtx(ctx, text)} }
 	return m, tea.Batch(m.sp.Tick, run)
+}
+
+func countOpen(args map[string]any) int {
+	ts, _ := args["todos"].([]any)
+	n := 0
+	for _, t := range ts {
+		mm, _ := t.(map[string]any)
+		if s, _ := mm["status"].(string); s != "done" {
+			n++
+		}
+	}
+	return n
 }
 
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
@@ -537,7 +571,13 @@ func (m *model) applyEvent(e core.Event) {
 			}
 		}
 	case "tool_call":
+		if e.Tool == "delegate" {
+			m.delegated = true
+		}
 		if e.Tool == "update_todos" {
+			if idx == 0 {
+				m.openTodos = countOpen(e.Args)
+			}
 			for _, l := range renderTodos(e.Args) {
 				m.appendLine(idx, l)
 			}
