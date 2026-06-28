@@ -28,6 +28,7 @@ import (
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/orchestrator"
+	"github.com/TedHaley/cheep/internal/provider"
 )
 
 const bannerArt = ` ██████╗██╗  ██╗███████╗███████╗██████╗ ██╗
@@ -39,6 +40,11 @@ const bannerArt = ` ██████╗██╗  ██╗██████�
 
 type evMsg core.Event
 type doneMsg struct{ r agent.RunResult }
+type switchMsg struct {
+	cfg config.Config
+	ok  bool
+	err string
+}
 
 type tab struct {
 	id     string // agent name: "orchestrator" / "qwen-local#2"
@@ -80,6 +86,8 @@ type model struct {
 	delegated bool // did the orchestrator call delegate this run?
 	nudges    int  // auto-continue count since the last user message
 	keepTabs  bool // keep finished executor tabs (else auto-close at turn end)
+
+	pendingCfg config.Config // last config we tried to switch to (avoid re-verifying)
 
 	usage      map[string][2]int // model -> {input, output} tokens this session
 	usageOrder []string          // models in first-seen order
@@ -271,6 +279,10 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		vp:     viewport.New(80, 20),
 	}
 	(&m).rebuild(false)
+	if m.buildErr != nil {
+		m.tabs[0].lines = append(m.tabs[0].lines,
+			errSt.Render("✗ ")+errText(m.buildErr)+hintSt.Render("  ·  fix with /config or /setup"))
+	}
 	return m
 }
 
@@ -411,19 +423,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			(&m).closeFinishedTabs()
 		}
-		// The orchestrator may have rewired cheep via the config tools; reload and
-		// rebuild so the change takes effect now (conversation preserved).
-		if fresh, err := config.Load(); err == nil && !configEqual(fresh, m.cfg) {
-			m.cfg = fresh
-			m.keepTabs = fresh.KeepTabs
-			(&m).rebuild(true)
-			if m.buildErr != nil {
-				m.footer = "config reloaded, but: " + m.buildErr.Error()
-			} else {
-				m.footer = "config reloaded · orchestrator " + fresh.Orchestrator.Model
-			}
-		}
 		(&m).syncViewport()
+		// The orchestrator may have rewired cheep via the config tools. Verify the
+		// new orchestrator is reachable BEFORE switching to it (don't brick the
+		// session); applied in the switchMsg handler.
+		if fresh, err := config.Load(); err == nil && !configEqual(fresh, m.cfg) && !configEqual(fresh, m.pendingCfg) {
+			m.pendingCfg = fresh
+			m.footer = "verifying new orchestrator " + fresh.Orchestrator.Model + " …"
+			return m, verifyConfigCmd(fresh)
+		}
 		// Backstop: orchestrator stopped with unfinished todos and never delegated.
 		if m.mode == orchestrator.ModeAuto && len(m.cfg.Executors) > 0 &&
 			msg.r.Status == "completed" && m.openTodos > 0 && !m.delegated && m.nudges < 2 {
@@ -443,6 +451,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ovDoneMsg:
 		m.ovBusy = false
+		return m, nil
+
+	case switchMsg:
+		if msg.ok {
+			m.cfg = msg.cfg
+			m.keepTabs = msg.cfg.KeepTabs
+			(&m).rebuild(true) // new providers, conversation preserved
+			(&m).appendLine(0, "")
+			for _, l := range welcomeLines(msg.cfg) { // re-show banner with new models
+				(&m).appendLine(0, l)
+			}
+			m.footer = "✓ switched orchestrator to " + msg.cfg.Orchestrator.Model
+			m.follow = true
+			(&m).syncViewport()
+		} else {
+			m.footer = "couldn't switch to " + msg.cfg.Orchestrator.Model + ": " + msg.err + " — keeping current orchestrator"
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -543,7 +568,12 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		return m.slash(text)
 	}
 	if m.session == nil {
-		m.footer = "not configured: " + errText(m.buildErr)
+		// Show the message and a clear, actionable error in the conversation.
+		(&m).appendLine(0, userSt.Render("› "+text))
+		(&m).appendLine(0, errSt.Render("✗ can't run")+hintSt.Render(" — "+errText(m.buildErr)+"  ·  fix with /config or /setup"))
+		m.active = 0
+		m.follow = true
+		(&m).syncViewport()
 		return m, nil
 	}
 	if m.running {
@@ -909,6 +939,26 @@ func isErrResult(s string) bool {
 		return true
 	}
 	return false
+}
+
+// verifyConfigCmd pings the new orchestrator; the result drives the switch.
+func verifyConfigCmd(cfg config.Config) tea.Cmd {
+	return func() tea.Msg {
+		o := cfg.Orchestrator
+		if o.Provider == "anthropic" && o.APIKey == "" {
+			return switchMsg{cfg: cfg, ok: false, err: "no API key (set ANTHROPIC_API_KEY in ~/.cheep/keys.env)"}
+		}
+		if o.Model == "" {
+			return switchMsg{cfg: cfg, ok: false, err: "no model set"}
+		}
+		p := provider.For(o.Provider, o.Endpoint, o.APIKey, 16)
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if _, err := p.Complete(ctx, o.Model, "Reply with: ok", []core.Message{{Role: "user", Text: "ok"}}, nil); err != nil {
+			return switchMsg{cfg: cfg, ok: false, err: short(err.Error(), 120)}
+		}
+		return switchMsg{cfg: cfg, ok: true}
+	}
 }
 
 func configEqual(a, b config.Config) bool {
