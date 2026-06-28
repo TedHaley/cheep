@@ -185,30 +185,12 @@ func gradientBanner() []string {
 // welcomeLines renders the banner beside a bordered config box as the
 // orchestrator tab's opening content (it scrolls away as you work).
 func welcomeLines(cfg config.Config) []string {
-	shared := len(cfg.Executors) > 0
-	for _, e := range cfg.Executors {
-		if e.Model != cfg.Orchestrator.Model {
-			shared = false
-		}
+	info := []string{"orchestrator | " + cfg.Orchestrator.Model}
+	if len(cfg.Executors) == 0 {
+		info = append(info, "mode         | solo")
 	}
-	var info []string
-	switch {
-	case len(cfg.Executors) == 0:
-		info = []string{"orchestrator | " + cfg.Orchestrator.Model, "mode         | solo"}
-	case shared:
-		info = []string{
-			"model | " + cfg.Orchestrator.Model,
-			hintSt.Render(fmt.Sprintf("shared by orchestrator + %d executor(s)", len(cfg.Executors))),
-		}
-	default:
-		names := make([]string, len(cfg.Executors))
-		for i, e := range cfg.Executors {
-			names[i] = e.Name
-		}
-		info = []string{
-			"orchestrator | " + cfg.Orchestrator.Model,
-			"executors    | " + strings.Join(names, ", "),
-		}
+	for _, e := range cfg.Executors {
+		info = append(info, "executor     | "+e.Model+"  ("+e.Name+")")
 	}
 	boxBody := strings.Join(append([]string{
 		lipgloss.NewStyle().Bold(true).Render(">_ cheep " + Version),
@@ -261,7 +243,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.vp.Width = msg.Width
-		m.vp.Height = max(3, msg.Height-4) // tab bar + separator + input + hint
+		m.vp.Height = max(3, msg.Height-5) // tab bar + rule + input + rule + hint
 		m.input.Width = msg.Width - 14
 		m.ovVP.Width = max(10, msg.Width-6)
 		m.ovVP.Height = max(3, msg.Height-7)
@@ -312,6 +294,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.footer = "cancelling…"
 			}
 			return m, nil
+		case "?":
+			if m.input.Value() == "" {
+				m.overlay = "help"
+				return m, nil
+			}
 		case "shift+tab":
 			m.mode = orchestrator.NextMode(m.mode)
 			(&m).rebuild(true)
@@ -429,7 +416,11 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.footer = "(cleared)"
 		(&m).syncViewport()
 	case "/status":
-		m.footer = statusLine(m.cfg)
+		for _, l := range statusLines(m.cfg) {
+			m.appendLine(m.active, l)
+		}
+		m.follow = true
+		(&m).syncViewport()
 	case "/setup", "/config":
 		return m.openSetup()
 	case "/help", "/?":
@@ -536,17 +527,28 @@ func (m model) View() string {
 	var hint string
 	if m.running {
 		elapsed := int(time.Since(m.started).Seconds())
-		hint = hintSt.Render(fmt.Sprintf("%s working… (%ds · esc to cancel)", m.sp.View(), elapsed))
+		q := ""
+		if len(m.queue) > 0 {
+			q = fmt.Sprintf(" · %d queued", len(m.queue))
+		}
+		hint = hintSt.Render(fmt.Sprintf("%s %s (%ds · esc to cancel%s)", m.sp.View(), verb(elapsed), elapsed, q))
 	} else {
-		base := "shift+tab: mode · tab: agent · pgup/pgdn: scroll · /help"
+		hint = hintSt.Render("? for shortcuts")
 		if m.footer != "" {
-			hint = m.footer + "   " + hintSt.Render(base)
-		} else {
-			hint = hintSt.Render(base)
+			hint = m.footer + "   " + hint
 		}
 	}
-	sep := hintSt.Render(strings.Repeat("─", max(1, m.w)))
-	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), sep, m.input.View(), hint)
+	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
+	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), rule, m.input.View(), rule, hint)
+}
+
+// verb returns a rotating whimsical gerund for the working indicator.
+func verb(elapsed int) string {
+	verbs := []string{
+		"Thinking", "Manifesting", "Conjuring", "Pondering", "Noodling", "Brewing",
+		"Wrangling", "Summoning", "Percolating", "Tinkering", "Computing", "Vibing",
+	}
+	return verbs[(elapsed/4)%len(verbs)] + "…"
 }
 
 func (m model) tabBar() string {
@@ -564,14 +566,15 @@ func (m model) tabBar() string {
 }
 
 func modePrompt(mode orchestrator.Mode) string {
-	sym := "⏵⏵"
+	sym, color := "⏵⏵", "220" // auto: yellow
 	switch mode {
 	case orchestrator.ModeChat:
-		sym = "⏵"
+		sym, color = "⏵", "244" // grey
 	case orchestrator.ModePlan:
-		sym = "⏸"
+		sym, color = "⏸", "37" // greenish-blue
 	}
-	return fmt.Sprintf("%s %s › ", sym, mode)
+	label := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(sym + " " + string(mode))
+	return label + " › "
 }
 
 func glyph(status string) string {
@@ -610,15 +613,15 @@ func statusKey(s string) string {
 	return ""
 }
 
-func statusLine(c config.Config) string {
+func statusLines(c config.Config) []string {
+	out := []string{"orchestrator: " + c.Orchestrator.Model}
 	if len(c.Executors) == 0 {
-		return fmt.Sprintf("orchestrator %s [%s] · solo", c.Orchestrator.Model, c.Orchestrator.Provider)
+		return append(out, "executors: (none — solo)")
 	}
-	names := make([]string, len(c.Executors))
-	for i, e := range c.Executors {
-		names[i] = e.Name
+	for _, e := range c.Executors {
+		out = append(out, "executor ("+e.Name+"): "+e.Model)
 	}
-	return fmt.Sprintf("orchestrator %s · executors: %s", c.Orchestrator.Model, strings.Join(names, ", "))
+	return out
 }
 
 func errText(err error) string {

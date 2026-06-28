@@ -31,7 +31,13 @@ type Tree struct {
 // Add creates a worktree on a fresh branch off the repo's current HEAD.
 // uniq must be unique within a run (e.g. an incrementing counter).
 func Add(repo, name string, uniq int) (*Tree, error) {
-	branch := fmt.Sprintf("cheep/%s-%d", sanitize(name), uniq)
+	_, _ = git(repo, "worktree", "prune") // clear stale worktree entries
+	base := "cheep/" + sanitize(name)
+	branch := fmt.Sprintf("%s-%d", base, uniq)
+	for branchExists(repo, branch) { // avoid colliding with leftover branches
+		uniq++
+		branch = fmt.Sprintf("%s-%d", base, uniq)
+	}
 	path, err := os.MkdirTemp("", "cheep-wt-")
 	if err != nil {
 		return nil, err
@@ -41,6 +47,11 @@ func Add(repo, name string, uniq int) (*Tree, error) {
 		return nil, fmt.Errorf("worktree add: %w", err)
 	}
 	return &Tree{Repo: repo, Path: path, Branch: branch}, nil
+}
+
+func branchExists(repo, branch string) bool {
+	_, err := git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
 }
 
 // CommitAll stages and commits everything in the worktree. Returns false (and no

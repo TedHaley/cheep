@@ -234,7 +234,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extra []c
 	defaultExec := order[0]
 	isolated := isolate && worktree.IsRepo(workdir)
 
-	delegate := func(args map[string]any) string {
+	delegate := func(ctx context.Context, args map[string]any) string {
 		rawTasks, _ := args["tasks"].([]any)
 		if len(rawTasks) == 0 {
 			return `ERROR: "tasks" must be a non-empty array of {"executor","subtask"}`
@@ -284,7 +284,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extra []c
 					}
 				}
 
-				r := rt.runSupervised(context.Background(), wd, j.subtask, label)
+				r := rt.runSupervised(ctx, wd, j.subtask, label)
 				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,

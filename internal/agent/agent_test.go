@@ -30,7 +30,7 @@ func TestRunCompletesAfterToolCall(t *testing.T) {
 	called := false
 	tools := []core.Tool{{
 		Name: "ping",
-		Func: func(map[string]any) string { called = true; return "pong" },
+		Func: func(context.Context, map[string]any) string { called = true; return "pong" },
 	}}
 	p := &scriptProvider{turns: []core.Turn{
 		{Message: core.Message{Role: "assistant", ToolCalls: []core.ToolCall{
@@ -55,7 +55,7 @@ func TestRunCompletesAfterToolCall(t *testing.T) {
 }
 
 func TestLoopDetection(t *testing.T) {
-	tools := []core.Tool{{Name: "spin", Func: func(map[string]any) string { return "x" }}}
+	tools := []core.Tool{{Name: "spin", Func: func(context.Context, map[string]any) string { return "x" }}}
 	loop := toolCallTurn("spin", map[string]any{"a": 1.0})
 	p := &scriptProvider{turns: []core.Turn{loop, loop, loop, loop}}
 
@@ -68,7 +68,7 @@ func TestLoopDetection(t *testing.T) {
 
 func TestMaxTurns(t *testing.T) {
 	// Distinct args each turn so loop detection does not fire first.
-	tools := []core.Tool{{Name: "spin", Func: func(map[string]any) string { return "x" }}}
+	tools := []core.Tool{{Name: "spin", Func: func(context.Context, map[string]any) string { return "x" }}}
 	turns := []core.Turn{
 		toolCallTurn("spin", map[string]any{"i": 1.0}),
 		toolCallTurn("spin", map[string]any{"i": 2.0}),
@@ -124,7 +124,7 @@ func TestSanitizeDropsOrphanAssistant(t *testing.T) {
 }
 
 func TestContextExhausted(t *testing.T) {
-	tools := []core.Tool{{Name: "spin", Func: func(map[string]any) string { return "x" }}}
+	tools := []core.Tool{{Name: "spin", Func: func(context.Context, map[string]any) string { return "x" }}}
 	turn := toolCallTurn("spin", map[string]any{"i": 1.0})
 	turn.InputTokens = 200
 	p := &scriptProvider{turns: []core.Turn{turn, turn}}

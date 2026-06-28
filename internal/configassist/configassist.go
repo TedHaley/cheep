@@ -91,7 +91,7 @@ func Build(cfg config.Config, onEvent core.EventFunc) (*agent.Agent, *State, str
 			Name:        "discover_models",
 			Description: "Probe an endpoint (and optional access key) for the models it serves; confirms reachability.",
 			Parameters:  obj(map[string]any{"endpoint": s, "api_key": s}, "endpoint"),
-			Func: func(a map[string]any) string {
+			Func: func(_ context.Context, a map[string]any) string {
 				base, models, err := provider.DiscoverModels(str(a, "endpoint"), str(a, "api_key"))
 				if err != nil {
 					return "ERROR: " + err.Error()
@@ -104,7 +104,7 @@ func Build(cfg config.Config, onEvent core.EventFunc) (*agent.Agent, *State, str
 			Name:        "set_orchestrator",
 			Description: `Set the orchestrator. provider is "anthropic" (Claude, blank endpoint) or "openai".`,
 			Parameters:  obj(map[string]any{"provider": s, "endpoint": s, "api_key": s, "model": s}, "provider", "model"),
-			Func: func(a map[string]any) string {
+			Func: func(_ context.Context, a map[string]any) string {
 				st.Cfg.Orchestrator = config.Agent{
 					Provider: str(a, "provider"), Endpoint: str(a, "endpoint"),
 					APIKey: str(a, "api_key"), Model: str(a, "model"),
@@ -116,7 +116,7 @@ func Build(cfg config.Config, onEvent core.EventFunc) (*agent.Agent, *State, str
 			Name:        "add_executor",
 			Description: "Add or replace an executor by name (OpenAI-compatible endpoint).",
 			Parameters:  obj(map[string]any{"name": s, "endpoint": s, "api_key": s, "model": s}, "name", "endpoint", "model"),
-			Func: func(a map[string]any) string {
+			Func: func(_ context.Context, a map[string]any) string {
 				e := config.Agent{
 					Name: str(a, "name"), Provider: "openai", Endpoint: str(a, "endpoint"),
 					APIKey: str(a, "api_key"), Model: str(a, "model"),
@@ -135,7 +135,7 @@ func Build(cfg config.Config, onEvent core.EventFunc) (*agent.Agent, *State, str
 			Name:        "remove_executor",
 			Description: "Remove an executor by name.",
 			Parameters:  obj(map[string]any{"name": s}, "name"),
-			Func: func(a map[string]any) string {
+			Func: func(_ context.Context, a map[string]any) string {
 				out := st.Cfg.Executors[:0]
 				for _, e := range st.Cfg.Executors {
 					if e.Name != str(a, "name") {
@@ -150,13 +150,13 @@ func Build(cfg config.Config, onEvent core.EventFunc) (*agent.Agent, *State, str
 			Name:        "show_config",
 			Description: "Show the current pending configuration.",
 			Parameters:  obj(map[string]any{}),
-			Func:        func(map[string]any) string { return render(st.Cfg) },
+			Func:        func(context.Context, map[string]any) string { return render(st.Cfg) },
 		},
 		{
 			Name:        "save",
 			Description: "Persist the configuration to disk.",
 			Parameters:  obj(map[string]any{}),
-			Func: func(map[string]any) string {
+			Func: func(context.Context, map[string]any) string {
 				if err := config.Save(st.Cfg); err != nil {
 					return "ERROR: " + err.Error()
 				}

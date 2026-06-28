@@ -138,7 +138,7 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 			a.emit(core.Event{Type: "tool_call", Tool: tc.Name, Args: tc.Arguments})
 			var resultText string
 			if t, ok := a.byName[tc.Name]; ok {
-				resultText = t.Func(tc.Arguments)
+				resultText = t.Func(ctx, tc.Arguments)
 			} else {
 				resultText = "ERROR: unknown tool " + tc.Name
 			}

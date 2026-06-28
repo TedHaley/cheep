@@ -31,12 +31,13 @@ type Turn struct {
 	OutputTokens int
 }
 
-// Tool is a callable exposed to an agent.
+// Tool is a callable exposed to an agent. Func receives the run's context so
+// long-running tools (bash, delegate) abort when the run is cancelled.
 type Tool struct {
 	Name        string
 	Description string
 	Parameters  map[string]any // JSON Schema for the arguments object
-	Func        func(map[string]any) string
+	Func        func(context.Context, map[string]any) string
 }
 
 // Provider is one model backend (Anthropic, OpenAI-compatible, ...).

@@ -59,7 +59,7 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 		workdir = abs
 	}
 
-	readFile := func(args map[string]any) string {
+	readFile := func(_ context.Context, args map[string]any) string {
 		p, err := confine(workdir, argStr(args, "path"))
 		if err != nil {
 			return "ERROR: " + err.Error()
@@ -71,7 +71,7 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 		return truncate(string(b))
 	}
 
-	listDir := func(args map[string]any) string {
+	listDir := func(_ context.Context, args map[string]any) string {
 		rel := argStr(args, "path")
 		if rel == "" {
 			rel = "."
@@ -95,13 +95,13 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 		return out.String()
 	}
 
-	runBash := func(args map[string]any) string {
+	runBash := func(parent context.Context, args map[string]any) string {
 		command := argStr(args, "command")
 		timeout := 120 * time.Second
 		if t, ok := args["timeout"].(float64); ok && t > 0 {
 			timeout = time.Duration(t) * time.Second
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "bash", "-c", command)
 		cmd.Dir = workdir
@@ -124,7 +124,7 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 			code, stdout.String(), stderr.String()))
 	}
 
-	writeFile := func(args map[string]any) string {
+	writeFile := func(_ context.Context, args map[string]any) string {
 		rel := argStr(args, "path")
 		p, err := confine(workdir, rel)
 		if err != nil {
@@ -196,7 +196,7 @@ func Make(workdir string, includeWrite bool) []core.Tool {
 				}, "title", "status"),
 			},
 		}, "todos"),
-		Func: func(args map[string]any) string {
+		Func: func(_ context.Context, args map[string]any) string {
 			n := 0
 			if ts, ok := args["todos"].([]any); ok {
 				n = len(ts)

@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,16 +26,17 @@ func TestConfine(t *testing.T) {
 
 func TestWriteFileConfined(t *testing.T) {
 	wd := t.TempDir()
-	var write func(map[string]any) string
+	var write func(context.Context, map[string]any) string
 	for _, tl := range Make(wd, true) {
 		if tl.Name == "write_file" {
 			write = tl.Func
 		}
 	}
-	if got := write(map[string]any{"path": "../evil.txt", "content": "x"}); !strings.HasPrefix(got, "ERROR") {
+	ctx := context.Background()
+	if got := write(ctx, map[string]any{"path": "../evil.txt", "content": "x"}); !strings.HasPrefix(got, "ERROR") {
 		t.Fatalf("escape write should error, got %q", got)
 	}
-	if got := write(map[string]any{"path": "ok.txt", "content": "hi"}); strings.HasPrefix(got, "ERROR") {
+	if got := write(ctx, map[string]any{"path": "ok.txt", "content": "hi"}); strings.HasPrefix(got, "ERROR") {
 		t.Fatalf("in-workspace write should succeed, got %q", got)
 	}
 	if _, err := os.Stat(filepath.Join(wd, "ok.txt")); err != nil {

@@ -9,6 +9,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -69,7 +70,7 @@ func Start(servers map[string]Server, onEvent core.EventFunc) ([]core.Tool, *Ses
 				Name:        sanitize(name) + "__" + sanitize(mt.Name),
 				Description: "[" + name + "] " + mt.Description,
 				Parameters:  params,
-				Func:        func(args map[string]any) string { return cc.callTool(real, args) },
+				Func:        func(_ context.Context, args map[string]any) string { return cc.callTool(real, args) },
 			})
 		}
 		emit(fmt.Sprintf("mcp %q: %d tool(s)", name, len(mts)))
