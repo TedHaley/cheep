@@ -22,7 +22,15 @@ type Agent struct {
 	APIKey      string `json:"api_key,omitempty"`
 	Model       string `json:"model"`
 	MaxTurns    int    `json:"max_turns,omitempty"`
-	TokenBudget int    `json:"token_budget,omitempty"`
+	TokenBudget int    `json:"token_budget,omitempty"` // executor: stop a run past this many input tokens
+
+	// Orchestrator self-compaction: when its estimated context exceeds this many
+	// tokens, older history is summarized and replaced. 0 picks a default.
+	ContextBudget int `json:"context_budget,omitempty"`
+
+	// Executor supervision.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"` // wall-clock abort per run
+	MaxResumes     int `json:"max_resumes,omitempty"`     // resume-with-summary attempts
 }
 
 type Config struct {
@@ -190,6 +198,9 @@ func (c *Config) ApplyDefaults() {
 	if o.MaxTurns == 0 {
 		o.MaxTurns = 30
 	}
+	if o.ContextBudget == 0 {
+		o.ContextBudget = 120000 // est. tokens; self-compaction trigger
+	}
 	if o.Provider == "anthropic" && o.APIKey == "" {
 		o.APIKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
@@ -203,6 +214,12 @@ func (c *Config) ApplyDefaults() {
 		}
 		if e.TokenBudget == 0 {
 			e.TokenBudget = 100000
+		}
+		if e.TimeoutSeconds == 0 {
+			e.TimeoutSeconds = 300
+		}
+		if e.MaxResumes == 0 {
+			e.MaxResumes = 2
 		}
 		if e.Provider == "anthropic" && e.APIKey == "" {
 			e.APIKey = os.Getenv("ANTHROPIC_API_KEY")

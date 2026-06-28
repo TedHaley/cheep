@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -415,7 +416,7 @@ func cmdCheck() {
 }
 
 func ping(p core.Provider, model string) {
-	if _, err := p.Complete(model, "Reply with: ok", []core.Message{{Role: "user", Text: "ok"}}, nil); err != nil {
+	if _, err := p.Complete(context.Background(), model, "Reply with: ok", []core.Message{{Role: "user", Text: "ok"}}, nil); err != nil {
 		fmt.Printf("%sunreachable: %v%s\n", cRed, err, cReset)
 		return
 	}

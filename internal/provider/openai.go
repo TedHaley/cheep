@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -125,7 +126,7 @@ func (o *OpenAI) toNative(system string, messages []core.Message) []map[string]a
 	return out
 }
 
-func (o *OpenAI) Complete(model, system string, messages []core.Message, tools []core.Tool) (core.Turn, error) {
+func (o *OpenAI) Complete(ctx context.Context, model, system string, messages []core.Message, tools []core.Tool) (core.Turn, error) {
 	var nativeTools []map[string]any
 	for _, t := range tools {
 		nativeTools = append(nativeTools, map[string]any{
@@ -145,7 +146,7 @@ func (o *OpenAI) Complete(model, system string, messages []core.Message, tools [
 	}
 	buf, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", o.BaseURL+"/chat/completions", bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, "POST", o.BaseURL+"/chat/completions", bytes.NewReader(buf))
 	if err != nil {
 		return core.Turn{}, err
 	}

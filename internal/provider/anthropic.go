@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,7 +68,7 @@ func (a *Anthropic) toNative(messages []core.Message) []anthMessage {
 	return out
 }
 
-func (a *Anthropic) Complete(model, system string, messages []core.Message, tools []core.Tool) (core.Turn, error) {
+func (a *Anthropic) Complete(ctx context.Context, model, system string, messages []core.Message, tools []core.Tool) (core.Turn, error) {
 	var nativeTools []map[string]any
 	for _, t := range tools {
 		nativeTools = append(nativeTools, map[string]any{
@@ -85,7 +86,7 @@ func (a *Anthropic) Complete(model, system string, messages []core.Message, tool
 	}
 	buf, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", a.BaseURL+"/v1/messages", bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.BaseURL+"/v1/messages", bytes.NewReader(buf))
 	if err != nil {
 		return core.Turn{}, err
 	}

@@ -7,10 +7,12 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/config"
@@ -56,18 +58,52 @@ Be economical: plan and delegate rather than doing the work yourself.
 When the entire task is verified complete, stop calling tools and give a final summary.`
 
 type execRuntime struct {
-	name     string
-	model    string
-	provider core.Provider
-	maxTurns int
-	budget   int
-	onEvent  core.EventFunc
+	name       string
+	model      string
+	provider   core.Provider
+	maxTurns   int
+	budget     int
+	timeout    time.Duration
+	maxResumes int
+	onEvent    core.EventFunc
 }
 
-func (e execRuntime) runIn(workdir, subtask string) agent.RunResult {
-	a := agent.New("executor:"+e.name, e.provider, e.model, executorSystem,
-		tool.Make(workdir, true), e.maxTurns, e.budget, e.onEvent)
-	return a.Run(subtask)
+func (e execRuntime) newSession(workdir string) *agent.Session {
+	return agent.New("executor:"+e.name, e.provider, e.model, executorSystem,
+		tool.Make(workdir, true), e.maxTurns, e.budget, e.onEvent).NewSession()
+}
+
+// runSupervised runs the subtask with a wall-clock timeout. If it ends short
+// (timeout, looping, max_turns, context_exhausted), it summarizes the progress
+// and resumes in a fresh session with that handoff, up to maxResumes times.
+func (e execRuntime) runSupervised(parent context.Context, workdir, subtask string) agent.RunResult {
+	task := subtask
+	var totalIn, totalOut, totalTurns int
+	for attempt := 0; ; attempt++ {
+		ctx, cancel := context.WithTimeout(parent, e.timeout)
+		sess := e.newSession(workdir)
+		r := sess.SendCtx(ctx, task)
+		cancel()
+
+		totalIn += r.InputTokens
+		totalOut += r.OutputTokens
+		totalTurns += r.Turns
+		r.InputTokens, r.OutputTokens, r.Turns = totalIn, totalOut, totalTurns
+
+		resumable := r.Status == "timeout" || r.Status == "max_turns" ||
+			r.Status == "looping" || r.Status == "context_exhausted"
+		if !resumable || attempt >= e.maxResumes || parent.Err() != nil {
+			return r
+		}
+
+		sctx, scancel := context.WithTimeout(parent, 60*time.Second)
+		summary := sess.Summarize(sctx)
+		scancel()
+		e.onEvent(core.Event{Agent: "executor:" + e.name, Type: "status",
+			Status: fmt.Sprintf("resuming after %s (attempt %d/%d)", r.Status, attempt+1, e.maxResumes)})
+		task = subtask + "\n\nA previous attempt was interrupted (" + r.Status + ").\n" +
+			"Progress so far:\n" + summary + "\n\nContinue from where it left off and finish the task."
+	}
 }
 
 func roster(execs []config.Agent) string {
@@ -97,20 +133,24 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 
 	// Solo mode: no executors, the orchestrator does the work itself.
 	if len(cfg.Executors) == 0 {
-		return agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
-			tool.Make(workdir, true), cfg.Orchestrator.MaxTurns, 0, onEvent), nil
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
+			tool.Make(workdir, true), cfg.Orchestrator.MaxTurns, 0, onEvent)
+		solo.CompactBudget = cfg.Orchestrator.ContextBudget
+		return solo, nil
 	}
 
 	runtimes := map[string]execRuntime{}
 	var order []string
 	for _, e := range cfg.Executors {
 		runtimes[e.Name] = execRuntime{
-			name:     e.Name,
-			model:    e.Model,
-			provider: provider.For(e.Provider, e.Endpoint, e.APIKey, 4096),
-			maxTurns: e.MaxTurns,
-			budget:   e.TokenBudget,
-			onEvent:  onEvent,
+			name:       e.Name,
+			model:      e.Model,
+			provider:   provider.For(e.Provider, e.Endpoint, e.APIKey, 4096),
+			maxTurns:   e.MaxTurns,
+			budget:     e.TokenBudget,
+			timeout:    time.Duration(e.TimeoutSeconds) * time.Second,
+			maxResumes: e.MaxResumes,
+			onEvent:    onEvent,
 		}
 		order = append(order, e.Name)
 	}
@@ -162,7 +202,7 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 					}
 				}
 
-				r := rt.runIn(wd, j.subtask)
+				r := rt.runSupervised(context.Background(), wd, j.subtask)
 				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,
@@ -243,6 +283,8 @@ func Build(cfg config.Config, workdir string, isolate bool, onEvent core.EventFu
 			"follow-up subtask (or resolve it yourself with git) before continuing."
 	}
 	tools := append(tool.Make(workdir, false), delegateTool)
-	return agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
-		cfg.Orchestrator.MaxTurns, 0, onEvent), nil
+	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
+		cfg.Orchestrator.MaxTurns, 0, onEvent)
+	orch.CompactBudget = cfg.Orchestrator.ContextBudget
+	return orch, nil
 }

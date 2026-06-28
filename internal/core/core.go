@@ -6,6 +6,8 @@
 // Qwen.
 package core
 
+import "context"
+
 // ToolCall is a model's request to invoke a tool.
 type ToolCall struct {
 	ID        string
@@ -39,18 +41,20 @@ type Tool struct {
 
 // Provider is one model backend (Anthropic, OpenAI-compatible, ...).
 type Provider interface {
-	Complete(model, system string, messages []Message, tools []Tool) (Turn, error)
+	Complete(ctx context.Context, model, system string, messages []Message, tools []Tool) (Turn, error)
 }
 
 // Event is emitted during an agent run for live display.
 type Event struct {
 	Agent  string
-	Type   string // "text" | "tool_call" | "tool_result" | "status" | "error"
+	Type   string // "text" | "tool_call" | "tool_result" | "status" | "error" | "progress"
 	Text   string
 	Tool   string
 	Args   map[string]any
 	Result string
 	Status string
+	Turn   int // progress: current turn
+	Tokens int // progress: cumulative input tokens
 }
 
 // EventFunc receives run events.

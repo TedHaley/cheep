@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/TedHaley/cheep/internal/core"
@@ -12,7 +13,7 @@ type scriptProvider struct {
 	i     int
 }
 
-func (s *scriptProvider) Complete(_, _ string, _ []core.Message, _ []core.Tool) (core.Turn, error) {
+func (s *scriptProvider) Complete(_ context.Context, _, _ string, _ []core.Message, _ []core.Tool) (core.Turn, error) {
 	t := s.turns[s.i]
 	s.i++
 	return t, nil
@@ -82,6 +83,43 @@ func TestMaxTurns(t *testing.T) {
 	}
 	if r.Turns != 3 {
 		t.Fatalf("turns = %d, want 3", r.Turns)
+	}
+}
+
+func TestDetectStuckConsecutive(t *testing.T) {
+	if detectStuck([]string{"a", "a", "a"}, 3) != "looping" {
+		t.Fatal("consecutive repeat not detected")
+	}
+}
+
+func TestDetectStuckWindowed(t *testing.T) {
+	// "x" appears 4 times within the window, not consecutively.
+	if detectStuck([]string{"x", "y", "x", "z", "x", "w", "x"}, 3) != "looping" {
+		t.Fatal("windowed repeat not detected")
+	}
+	if detectStuck([]string{"a", "b", "c", "d"}, 3) != "" {
+		t.Fatal("false positive on distinct calls")
+	}
+}
+
+func TestSendAbortedOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// nil turns => Complete would panic if called; cancellation must prevent that.
+	r := New("t", &scriptProvider{}, "m", "sys", nil, 5, 0, nil).NewSession().SendCtx(ctx, "hi")
+	if r.Status != "aborted" {
+		t.Fatalf("status = %q, want aborted", r.Status)
+	}
+}
+
+func TestSanitizeDropsOrphanAssistant(t *testing.T) {
+	msgs := []core.Message{
+		{Role: "user", Text: "hi"},
+		{Role: "assistant", ToolCalls: []core.ToolCall{{ID: "1", Name: "x"}}},
+	}
+	out := sanitize(msgs)
+	if len(out) != 1 || out[0].Role != "user" {
+		t.Fatalf("expected just the user message, got %+v", out)
 	}
 }
 
