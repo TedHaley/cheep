@@ -720,10 +720,11 @@ func (m *model) applyEvent(e core.Event) {
 			m.appendLine(idx, hintSt.Render("● started"))
 		} else {
 			t.status = statusKey(e.Status)
-			m.appendLine(idx, hintSt.Render("■ "+e.Status))
-			if m.keepTabs && idx != 0 {
-				m.appendLine(idx, hintSt.Render("done — ctrl+w or /close to close this tab"))
+			line := "■ " + e.Status
+			if idx != 0 { // executor finished — show how to close its tab
+				line += "  ·  ctrl+w or /close to close this tab"
 			}
+			m.appendLine(idx, hintSt.Render(line))
 		}
 	case "text":
 		if strings.TrimSpace(e.Text) != "" {
