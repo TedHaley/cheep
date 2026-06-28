@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Agent describes one model endpoint (orchestrator or executor).
@@ -29,15 +30,24 @@ type Config struct {
 	Executors    []Agent `json:"executors"`
 }
 
+// Home is cheep's root directory (~/.cheep by default; override with CHEEP_HOME).
+// It holds config.json and keys.env.
+func Home() (string, error) {
+	if h := os.Getenv("CHEEP_HOME"); h != "" {
+		return h, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".cheep"), nil
+}
+
 func Dir() (string, error) {
 	if p := os.Getenv("CHEEP_CONFIG"); p != "" {
 		return filepath.Dir(p), nil
 	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "cheep"), nil
+	return Home()
 }
 
 // Path is the config file location. Override it with CHEEP_CONFIG to keep
@@ -46,11 +56,99 @@ func Path() (string, error) {
 	if p := os.Getenv("CHEEP_CONFIG"); p != "" {
 		return p, nil
 	}
-	d, err := Dir()
+	h, err := Home()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(d, "config.json"), nil
+	return filepath.Join(h, "config.json"), nil
+}
+
+// KeysPath is the central key store (~/.cheep/keys.env).
+func KeysPath() (string, error) {
+	h, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(h, "keys.env"), nil
+}
+
+// Init prepares the cheep home: migrates any legacy config and loads keys.env
+// into the environment. Call once at startup.
+func Init() {
+	migrateLegacy()
+	loadKeys()
+}
+
+// loadKeys reads keys.env (KEY=value per line) and sets each into the
+// environment, without overwriting variables already set in the shell.
+func loadKeys() {
+	p, err := KeysPath()
+	if err != nil {
+		return
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		k = strings.TrimSpace(k)
+		v = strings.Trim(strings.TrimSpace(v), `"'`)
+		if ok && k != "" && os.Getenv(k) == "" {
+			os.Setenv(k, v)
+		}
+	}
+}
+
+// migrateLegacy copies a config.json from the old location
+// (UserConfigDir/cheep) into the cheep home, once, if the new one is absent.
+func migrateLegacy() {
+	if os.Getenv("CHEEP_CONFIG") != "" {
+		return
+	}
+	np, err := Path()
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(np); err == nil {
+		return // new config already present
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(base, "cheep", "config.json"))
+	if err != nil {
+		return
+	}
+	if h, err := Home(); err == nil {
+		_ = os.MkdirAll(h, 0o700)
+		_ = os.WriteFile(np, b, 0o600)
+	}
+}
+
+// EnsureKeysTemplate creates keys.env with a starter template if it is missing,
+// and returns its path.
+func EnsureKeysTemplate() (string, error) {
+	p, err := KeysPath()
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p, nil
+	}
+	if h, err := Home(); err == nil {
+		_ = os.MkdirAll(h, 0o700)
+	}
+	tmpl := "# cheep keys — one KEY=value per line. Loaded into the environment on startup.\n" +
+		"# Anything you set in your shell takes precedence over these.\n\n" +
+		"# Anthropic / Claude (orchestrator):\n" +
+		"# ANTHROPIC_API_KEY=sk-ant-...\n"
+	return p, os.WriteFile(p, []byte(tmpl), 0o600)
 }
 
 func Exists() bool {

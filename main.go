@@ -41,6 +41,7 @@ const bannerArt = `
  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝`
 
 func main() {
+	config.Init() // migrate legacy config + load ~/.cheep/keys.env into the env
 	if len(os.Args) < 2 {
 		cmdChat()
 		return
@@ -52,6 +53,8 @@ func main() {
 		cmdCheck()
 	case "config":
 		cmdConfig(os.Args[2:])
+	case "keys":
+		cmdKeys()
 	case "version", "-v", "--version":
 		fmt.Printf("cheep %s\n", version)
 	case "-h", "--help", "help":
@@ -71,6 +74,7 @@ Usage:
   cheep run "<task>" [--workdir] run a single task non-interactively
   cheep check                    ping the orchestrator and every executor
   cheep config [show|path]       set up or inspect your agents
+  cheep keys                     show the key store (~/.cheep/keys.env)
   cheep version                  print the version
 
 On first use, cheep walks you through choosing an orchestrator and, optionally,
@@ -107,10 +111,11 @@ func cmdChat() {
 	workdir, _ := os.Getwd()
 	onEvent := printer()
 
+	var buildErr error
 	makeSession := func() *agent.Session {
 		orch, err := orchestrator.Build(cfg, workdir, true, onEvent)
+		buildErr = err
 		if err != nil {
-			fmt.Printf("%s%v%s\n", cYellow, err, cReset)
 			return nil
 		}
 		return orch.NewSession()
@@ -118,9 +123,12 @@ func cmdChat() {
 
 	fmt.Printf("%s%s%s\n", cCyan, bannerArt, cReset)
 	printStatus(cfg, workdir)
-	fmt.Printf("%sType a task, or /help for commands. Ctrl-D or /exit to quit.%s\n", cDim, cReset)
 
 	session := makeSession()
+	if buildErr != nil {
+		fmt.Printf("%s%v%s\n", cYellow, buildErr, cReset)
+	}
+	fmt.Printf("%sType a task, or /help for commands. Ctrl-D or /exit to quit.%s\n", cDim, cReset)
 	in := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Print("\n› ")
@@ -166,7 +174,7 @@ func cmdChat() {
 		}
 
 		if session == nil {
-			fmt.Printf("%snot configured yet — run /config%s\n", cYellow, cReset)
+			fmt.Printf("%scan't start a session: %v%s\n", cYellow, buildErr, cReset)
 			continue
 		}
 		r := session.Send(line)
@@ -350,6 +358,18 @@ func cmdConfig(argv []string) {
 	default:
 		fatal(fmt.Errorf("unknown config subcommand %q (use show|path|edit)", sub))
 	}
+}
+
+// ---- keys -----------------------------------------------------------------
+
+func cmdKeys() {
+	p, err := config.EnsureKeysTemplate()
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("Key store: %s\n", p)
+	fmt.Println("Add one KEY=value per line; it's loaded into the environment on startup.")
+	fmt.Println("For Claude, add:  ANTHROPIC_API_KEY=sk-ant-...")
 }
 
 // ---- one-shot run ---------------------------------------------------------
