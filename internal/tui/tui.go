@@ -411,6 +411,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			(&m).closeFinishedTabs()
 		}
+		// The orchestrator may have rewired cheep via the config tools; reload and
+		// rebuild so the change takes effect now (conversation preserved).
+		if fresh, err := config.Load(); err == nil && !configEqual(fresh, m.cfg) {
+			m.cfg = fresh
+			m.keepTabs = fresh.KeepTabs
+			(&m).rebuild(true)
+			if m.buildErr != nil {
+				m.footer = "config reloaded, but: " + m.buildErr.Error()
+			} else {
+				m.footer = "config reloaded · orchestrator " + fresh.Orchestrator.Model
+			}
+		}
 		(&m).syncViewport()
 		// Backstop: orchestrator stopped with unfinished todos and never delegated.
 		if m.mode == orchestrator.ModeAuto && len(m.cfg.Executors) > 0 &&
@@ -897,6 +909,12 @@ func isErrResult(s string) bool {
 		return true
 	}
 	return false
+}
+
+func configEqual(a, b config.Config) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }
 
 func describeStatus(s string) string {

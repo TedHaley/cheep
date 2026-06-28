@@ -16,6 +16,7 @@ import (
 
 	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/config"
+	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tool"
@@ -37,7 +38,11 @@ read). If you get blocked, stop and explain what is blocking you and why.`
 const soloSystem = `You are cheep, a capable autonomous coding agent. Complete the user's task
 directly using your tools (read_file, write_file, list_dir, run_bash). Plan briefly, make the
 changes, and verify them (read files back, run tests/commands). When the task is done, stop
-calling tools and give a short summary of what you did and how to verify it.`
+calling tools and give a short summary of what you did and how to verify it.
+
+If the user asks to change cheep's own setup (switch your model, add executors), use the
+config tools (get_config, discover_models, set_orchestrator, add_executor, remove_executor);
+changes apply on the next message. Do not edit ~/.cheep files directly.`
 
 const chatSystem = `You are cheep in CHAT MODE. You have no tools and make no changes to the
 workspace. Discuss, brainstorm, explain, and help the user think through their project and
@@ -115,9 +120,10 @@ Be economical: plan and delegate rather than doing the work yourself.
   context_exhausted, error): split the subtask smaller, clarify it, or fix the blocker,
   then delegate again.
 - Plan, delegate, and verify — that is your whole job.
-- NEVER modify cheep's own configuration (the ~/.cheep directory) and NEVER run the "cheep"
-  binary yourself. To run work in parallel, use the delegate tool with multiple tasks — the
-  executors already exist.
+- To CHANGE cheep's setup (switch your own model, add/remove executors) when the user asks,
+  use the config tools (get_config, discover_models, set_orchestrator, add_executor,
+  remove_executor) — changes apply on the next message. NEVER edit ~/.cheep files directly or
+  run the "cheep" binary. To run work in parallel, use delegate — the executors already exist.
 
 When the entire task is verified complete, stop calling tools and give a final summary.`
 
@@ -236,6 +242,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 	if len(cfg.Executors) == 0 {
 		soloTools := append(tool.Make(workdir, true), extraOrch...)
 		soloTools = append(soloTools, extraExec...)
+		soloTools = append(soloTools, configtools.Tools()...)
 		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
@@ -393,6 +400,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 	}
 	tools := append(tool.Make(workdir, false), delegateTool)
 	tools = append(tools, extraOrch...)
+	tools = append(tools, configtools.Tools()...)
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
 		cfg.Orchestrator.MaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget
