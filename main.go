@@ -119,7 +119,7 @@ func cmdChat() {
 	cfg := ensureConfig()
 	workdir, _ := os.Getwd()
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		if err := tui.Run(cfg, workdir); err != nil {
+		if err := tui.Run(cfg, workdir, version); err != nil {
 			fatal(err)
 		}
 		return

@@ -9,6 +9,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ type model struct {
 	running bool
 	started time.Time
 	cancel  context.CancelFunc
+	queue   []string // messages typed while a task is running
 	footer  string
 
 	// overlay: "" (none) | "help" | "setup"
@@ -83,8 +85,12 @@ var (
 	barSt       = lipgloss.NewStyle().Background(lipgloss.Color("236"))
 )
 
+// Version is shown in the header; set by main before Run.
+var Version = "dev"
+
 // Run starts the full-screen shell.
-func Run(cfg config.Config, workdir string) error {
+func Run(cfg config.Config, workdir, version string) error {
+	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -126,26 +132,72 @@ func newModel(cfg config.Config, workdir string, events chan core.Event) model {
 	return m
 }
 
-// welcomeLines renders the banner + a short status as the orchestrator tab's
-// opening content (it scrolls away as the conversation grows).
-func welcomeLines(cfg config.Config) []string {
-	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	out := []string{}
-	for _, l := range strings.Split(bannerArt, "\n") {
-		out = append(out, cyan.Render(l))
+// gradient palette: a smooth cyan → blue → violet → pink ramp (256-color).
+var bannerRamp = []string{"51", "45", "39", "75", "111", "147", "183", "177", "213", "207"}
+
+func gradientBanner() []string {
+	lines := strings.Split(bannerArt, "\n")
+	width := 0
+	for _, l := range lines {
+		if n := len([]rune(l)); n > width {
+			width = n
+		}
 	}
-	out = append(out, "", fmt.Sprintf("orchestrator: %s [%s]", cfg.Orchestrator.Model, cfg.Orchestrator.Provider))
-	if len(cfg.Executors) == 0 {
-		out = append(out, "mode: solo (orchestrator does the work itself)")
-	} else {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		var b strings.Builder
+		for col, r := range []rune(l) {
+			c := bannerRamp[col*len(bannerRamp)/(width+1)]
+			b.WriteString("\x1b[38;5;" + c + "m" + string(r))
+		}
+		b.WriteString("\x1b[0m")
+		out[i] = b.String()
+	}
+	return out
+}
+
+// welcomeLines renders the banner beside a bordered config box as the
+// orchestrator tab's opening content (it scrolls away as you work).
+func welcomeLines(cfg config.Config) []string {
+	exec := "solo — orchestrator does the work itself"
+	if len(cfg.Executors) > 0 {
 		names := make([]string, len(cfg.Executors))
 		for i, e := range cfg.Executors {
-			names[i] = e.Name + " → " + e.Model
+			names[i] = e.Name
 		}
-		out = append(out, "executors: "+strings.Join(names, ", "))
+		exec = strings.Join(names, ", ")
 	}
-	out = append(out, hintSt.Render("Tips: shift+tab cycles modes · tab switches agents · /help"), "")
+	boxBody := strings.Join([]string{
+		lipgloss.NewStyle().Bold(true).Render(">_ cheep (" + Version + ")"),
+		"",
+		"orchestrator | " + cfg.Orchestrator.Model,
+		"executors    | " + exec,
+		hintSt.Render(shortWorkdir()),
+	}, "\n")
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(0, 1).Render(boxBody)
+
+	header := lipgloss.JoinHorizontal(lipgloss.Center,
+		strings.Join(gradientBanner(), "\n"), "   ", box)
+
+	out := []string{""} // top space
+	out = append(out, strings.Split(header, "\n")...)
+	out = append(out, "",
+		hintSt.Render("Tips: shift+tab cycles modes · tab switches agents · /help"), "")
 	return out
+}
+
+func shortWorkdir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(wd, home) {
+		return "~" + wd[len(home):]
+	}
+	return wd
 }
 
 func (m *model) rebuild(keep bool) {
@@ -169,7 +221,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.vp.Width = msg.Width
-		m.vp.Height = max(3, msg.Height-3) // tab bar (1) + footer (2)
+		m.vp.Height = max(3, msg.Height-4) // tab bar + separator + input + hint
 		m.input.Width = msg.Width - 14
 		m.ovVP.Width = max(10, msg.Width-6)
 		m.ovVP.Height = max(3, msg.Height-7)
@@ -188,6 +240,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tabs[0].status = statusKey(msg.r.Status)
 		m.footer = fmt.Sprintf("%s · %d turns · %d→%d tokens", msg.r.Status, msg.r.Turns, msg.r.InputTokens, msg.r.OutputTokens)
 		(&m).syncViewport()
+		if len(m.queue) > 0 { // run the next queued message
+			next := m.queue[0]
+			m.queue = m.queue[1:]
+			return m.startTask(next)
+		}
 		return m, nil
 
 	case ovDoneMsg:
@@ -270,22 +327,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
-	m.input.Reset()
 	if text == "" {
 		return m, nil
 	}
+	m.input.Reset()
 	if strings.HasPrefix(text, "/") {
 		return m.slash(text)
-	}
-	if m.running {
-		m.footer = "busy — wait for the current task to finish"
-		return m, nil
 	}
 	if m.session == nil {
 		m.footer = "not configured: " + errText(m.buildErr)
 		return m, nil
 	}
-	(&m).appendLine(0, "› "+text)
+	if m.running {
+		// Queue it — it runs automatically when the current task finishes.
+		m.queue = append(m.queue, text)
+		(&m).appendLine(0, "› "+text+"  "+hintSt.Render("(queued)"))
+		m.active = 0
+		m.follow = true
+		(&m).syncViewport()
+		return m, nil
+	}
+	return m.startTask(text)
+}
+
+func (m model) startTask(text string) (tea.Model, tea.Cmd) {
+	(&m).appendLine(0, lipgloss.NewStyle().Bold(true).Render("› "+text))
 	m.tabs[0].status = "run"
 	m.active = 0
 	m.follow = true
@@ -376,7 +442,7 @@ func (m *model) applyEvent(e core.Event) {
 		}
 	case "text":
 		if e.Text != "" {
-			m.appendLine(idx, e.Text)
+			m.appendLine(idx, "✦ "+e.Text)
 		}
 	case "tool_call":
 		m.appendLine(idx, "→ "+e.Tool+"("+shortArgs(e.Args)+")")
@@ -430,7 +496,8 @@ func (m model) View() string {
 			hint = hintSt.Render(base)
 		}
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), m.input.View(), hint)
+	sep := hintSt.Render(strings.Repeat("─", max(1, m.w)))
+	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), sep, m.input.View(), hint)
 }
 
 func (m model) tabBar() string {
