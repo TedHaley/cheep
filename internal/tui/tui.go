@@ -102,7 +102,9 @@ func renderMarkdown(md string, width int) []string {
 		width = 80
 	}
 	bullet := bulletSt.Render("●") + " "
-	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(width-2))
+	// Use a fixed style, NOT WithAutoStyle — auto-style queries the terminal
+	// (OSC 11) at runtime, which corrupts Bubble Tea's stdin/stdout.
+	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(width-2))
 	if err != nil {
 		return []string{bullet + md}
 	}
@@ -232,11 +234,7 @@ func welcomeLines(cfg config.Config) []string {
 		counts[e.Model]++
 	}
 	for _, model := range order {
-		line := "executor     | " + model
-		if counts[model] > 1 {
-			line += fmt.Sprintf("  (×%d)", counts[model])
-		}
-		info = append(info, line)
+		info = append(info, "executor     | "+model)
 	}
 	boxBody := strings.Join(append([]string{
 		lipgloss.NewStyle().Bold(true).Render(">_ cheep " + Version),
