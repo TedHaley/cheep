@@ -118,6 +118,7 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 		msg := res.Message
 		s.messages = append(s.messages, msg)
 		a.emit(core.Event{Type: "progress", Turn: turn, Tokens: inTok})
+		a.emit(core.Event{Type: "usage", Model: a.Model, InTok: res.InputTokens, OutTok: res.OutputTokens})
 		if msg.Text != "" {
 			a.emit(core.Event{Type: "text", Text: msg.Text})
 		}

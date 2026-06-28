@@ -140,7 +140,7 @@ func (e execRuntime) newSession(workdir, label string) *agent.Session {
 // label is the executor instance's display name (e.g. "qwen-local#2"); all its
 // events carry it so the UI can group them into one tab.
 func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, label string) agent.RunResult {
-	e.onEvent(core.Event{Agent: label, Type: "lifecycle", Status: "start"})
+	e.onEvent(core.Event{Agent: label, Type: "lifecycle", Status: "start", Text: subtask})
 	task := subtask
 	var totalIn, totalOut, totalTurns int
 	var r agent.RunResult

@@ -54,8 +54,11 @@ type Event struct {
 	Args   map[string]any
 	Result string
 	Status string
-	Turn   int // progress: current turn
-	Tokens int // progress: cumulative input tokens
+	Turn   int    // progress: current turn
+	Tokens int    // progress: cumulative input tokens
+	Model  string // usage: the model that produced this turn
+	InTok  int    // usage: input tokens this turn
+	OutTok int    // usage: output tokens this turn
 }
 
 // EventFunc receives run events.

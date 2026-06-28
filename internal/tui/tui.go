@@ -44,7 +44,10 @@ type tab struct {
 	title  string
 	status string // "" | run | ok | warn | err
 	lines  []string
+	todos  []todoItem // latest checklist (rendered as a sticky header, updated in place)
 }
+
+type todoItem struct{ title, status string }
 
 type model struct {
 	cfg       config.Config
@@ -75,6 +78,9 @@ type model struct {
 	openTodos int  // non-done todos from the orchestrator's latest update_todos
 	delegated bool // did the orchestrator call delegate this run?
 	nudges    int  // auto-continue count since the last user message
+
+	usage      map[string][2]int // model -> {input, output} tokens this session
+	usageOrder []string          // models in first-seen order
 
 	// overlay: "" (none) | "help" | "setup"
 	overlay string
@@ -123,22 +129,45 @@ func renderMarkdown(md string, width int) []string {
 	return lines
 }
 
-func renderTodos(args map[string]any) []string {
+func parseTodos(args map[string]any) []todoItem {
 	ts, _ := args["todos"].([]any)
-	out := []string{lipgloss.NewStyle().Bold(true).Render("Todos")}
+	out := make([]todoItem, 0, len(ts))
 	for _, t := range ts {
 		mm, _ := t.(map[string]any)
 		title, _ := mm["title"].(string)
-		switch s, _ := mm["status"].(string); s {
+		status, _ := mm["status"].(string)
+		out = append(out, todoItem{title: title, status: status})
+	}
+	return out
+}
+
+// todoHeaderLines renders the checklist as a sticky header (nil if no todos).
+func todoHeaderLines(todos []todoItem) []string {
+	if len(todos) == 0 {
+		return nil
+	}
+	out := []string{lipgloss.NewStyle().Bold(true).Render("Todos")}
+	for _, t := range todos {
+		switch t.status {
 		case "done":
-			out = append(out, "  "+todoDoneSt.Render("✓ "+title))
+			out = append(out, "  "+todoDoneSt.Render("✓ "+t.title))
 		case "in_progress":
-			out = append(out, "  "+todoProgSt.Render("◉ "+title))
+			out = append(out, "  "+todoProgSt.Render("◉ "+t.title))
 		default:
-			out = append(out, "  ○ "+title)
+			out = append(out, "  ○ "+t.title)
 		}
 	}
 	return out
+}
+
+func countOpenItems(todos []todoItem) int {
+	n := 0
+	for _, t := range todos {
+		if t.status != "done" {
+			n++
+		}
+	}
+	return n
 }
 
 // Version is shown in the header; set by main before Run.
@@ -149,7 +178,9 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events, extraOrch, extraExec)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// No mouse tracking: lets the terminal handle native text selection/copy
+	// (mouse tracking would hijack drag-select and leak mouse escape codes).
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	go func() {
 		for e := range events {
 			p.Send(evMsg(e))
@@ -166,6 +197,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	ta.ShowLineNumbers = false
 	ta.SetHeight(1)
 	ta.CharLimit = 0
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle() // no current-line highlight
 	ta.Focus()
 	// Enter submits (handled in Update); these insert a newline instead.
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "alt+enter", "ctrl+j"))
@@ -188,6 +220,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		},
 		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg)}},
 		byName: map[string]int{"orchestrator": 0, "cheep": 0},
+		usage:  map[string][2]int{},
 		input:  ta,
 		sp:     sp,
 		vp:     viewport.New(80, 20),
@@ -255,7 +288,7 @@ func welcomeLines(cfg config.Config) []string {
 	out := []string{""} // top space
 	out = append(out, strings.Split(header, "\n")...)
 	out = append(out, "",
-		hintSt.Render("Tips: shift+tab cycles modes · tab switches agents · /help"), "")
+		hintSt.Render("Tips: shift+tab cycles modes · multi-agent delegation runs in AUTO mode · /help"), "")
 	return out
 }
 
@@ -296,7 +329,11 @@ func (m *model) relayout() {
 		lines = 6
 	}
 	m.input.SetHeight(lines)
-	m.vp.Height = max(3, m.h-4-lines) // tab bar + rule + rule + hint = 4
+	header := 0
+	if len(m.tabs) > 0 {
+		header = len(todoHeaderLines(m.tabs[m.active].todos))
+	}
+	m.vp.Height = max(3, m.h-4-lines-header) // tab bar + rule + rule + hint = 4
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -473,17 +510,6 @@ func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(m.sp.Tick, run)
 }
 
-func countOpen(args map[string]any) int {
-	ts, _ := args["todos"].([]any)
-	n := 0
-	for _, t := range ts {
-		mm, _ := t.(map[string]any)
-		if s, _ := mm["status"].(string); s != "done" {
-			n++
-		}
-	}
-	return n
-}
 
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	switch strings.Fields(text)[0] {
@@ -510,6 +536,12 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		(&m).syncViewport()
 	case "/status":
 		for _, l := range statusLines(m.cfg) {
+			m.appendLine(m.active, l)
+		}
+		m.follow = true
+		(&m).syncViewport()
+	case "/tokens":
+		for _, l := range m.tokenLines() {
 			m.appendLine(m.active, l)
 		}
 		m.follow = true
@@ -542,6 +574,18 @@ func (m *model) appendLine(idx int, line string) {
 }
 
 func (m *model) applyEvent(e core.Event) {
+	if e.Type == "usage" { // accumulate token usage per model
+		if e.Model != "" {
+			if _, seen := m.usage[e.Model]; !seen {
+				m.usageOrder = append(m.usageOrder, e.Model)
+			}
+			u := m.usage[e.Model]
+			u[0] += e.InTok
+			u[1] += e.OutTok
+			m.usage[e.Model] = u
+		}
+		return
+	}
 	// Setup-assistant events feed the overlay, not a tab.
 	if e.Agent == "setup" {
 		if line := formatEvent(e); line != "" {
@@ -559,10 +603,13 @@ func (m *model) applyEvent(e core.Event) {
 	case "lifecycle":
 		if e.Status == "start" {
 			t.status = "run"
-			m.appendLine(idx, "● started")
+			if e.Text != "" {
+				m.appendLine(idx, todoProgSt.Render("▶ task: ")+short(e.Text, 200))
+			}
+			m.appendLine(idx, hintSt.Render("● started"))
 		} else {
 			t.status = statusKey(e.Status)
-			m.appendLine(idx, "■ "+e.Status)
+			m.appendLine(idx, hintSt.Render("■ "+e.Status))
 		}
 	case "text":
 		if e.Text != "" {
@@ -575,11 +622,9 @@ func (m *model) applyEvent(e core.Event) {
 			m.delegated = true
 		}
 		if e.Tool == "update_todos" {
+			m.tabs[idx].todos = parseTodos(e.Args) // single list, updated in place
 			if idx == 0 {
-				m.openTodos = countOpen(e.Args)
-			}
-			for _, l := range renderTodos(e.Args) {
-				m.appendLine(idx, l)
+				m.openTodos = countOpenItems(m.tabs[idx].todos)
 			}
 			break
 		}
@@ -611,6 +656,7 @@ func (m *model) syncViewport() {
 	if !m.ready || len(m.tabs) == 0 {
 		return
 	}
+	m.relayout() // header height depends on the active tab's todos
 	m.vp.SetContent(strings.Join(m.tabs[m.active].lines, "\n"))
 	if m.follow {
 		m.vp.GotoBottom()
@@ -640,7 +686,12 @@ func (m model) View() string {
 	}
 	hint := modeLabel(m.mode) + "   " + status
 	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
-	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), rule, m.input.View(), rule, hint)
+	parts := []string{m.tabBar()}
+	if header := todoHeaderLines(m.tabs[m.active].todos); len(header) > 0 {
+		parts = append(parts, strings.Join(header, "\n"))
+	}
+	parts = append(parts, m.vp.View(), rule, m.input.View(), rule, hint)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // verb returns a rotating whimsical gerund for the working indicator.
@@ -711,6 +762,45 @@ func statusKey(s string) string {
 		return "warn"
 	}
 	return ""
+}
+
+func (m model) isLocal(model string) bool {
+	check := func(a config.Agent) bool {
+		return a.Model == model && a.Provider != "anthropic" &&
+			(strings.Contains(a.Endpoint, "localhost") ||
+				strings.Contains(a.Endpoint, "127.0.0.1") ||
+				strings.Contains(a.Endpoint, "0.0.0.0"))
+	}
+	if check(m.cfg.Orchestrator) {
+		return true
+	}
+	for _, e := range m.cfg.Executors {
+		if check(e) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m model) tokenLines() []string {
+	if len(m.usageOrder) == 0 {
+		return []string{"no token usage yet this session"}
+	}
+	out := []string{lipgloss.NewStyle().Bold(true).Render("Token usage this session")}
+	local := 0
+	for _, model := range m.usageOrder {
+		u := m.usage[model]
+		tag := "cloud"
+		if m.isLocal(model) {
+			tag = "local · free"
+			local += u[0] + u[1]
+		}
+		out = append(out, fmt.Sprintf("  %-30s in %d · out %d  (%s)", model, u[0], u[1], tag))
+	}
+	if local > 0 {
+		out = append(out, todoDoneSt.Render(fmt.Sprintf("  %d tokens ran on local models at no API cost", local)))
+	}
+	return out
 }
 
 func statusLines(c config.Config) []string {
