@@ -1,16 +1,25 @@
-// Package configtools exposes cheep's own configuration to an agent as tools, so
-// the orchestrator can reconfigure cheep (switch its model, add/remove executors)
-// when the user asks — instead of editing files via the shell. Each tool
-// load-modifies-saves the config file; the shell reloads it after the turn.
+// Package configtools exposes cheep's configuration to an agent as tools, so the
+// orchestrator (or, in rescue mode, an executor) can get the user set up and
+// reconfigure cheep — discover local servers and API keys, then apply them —
+// instead of editing files via the shell.
 package configtools
 
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/provider"
+)
+
+var (
+	foundMu  sync.Mutex
+	foundKey = map[string]string{} // name -> value located by discover (for copy_key)
 )
 
 func str(a map[string]any, k string) string {
@@ -34,7 +43,102 @@ func redacted(c config.Config) config.Config {
 	return c
 }
 
-// Tools returns the configuration-editing tools.
+func mask(v string) string {
+	if len(v) <= 10 {
+		return "•••"
+	}
+	return v[:6] + "…" + v[len(v)-4:]
+}
+
+// ---- discovery -------------------------------------------------------------
+
+type keyHit struct {
+	Name    string `json:"name"`
+	FoundIn string `json:"found_in"`
+	Preview string `json:"preview"`
+	value   string
+}
+
+func looksLikeKey(name string) bool {
+	return strings.HasSuffix(name, "_API_KEY") || strings.HasSuffix(name, "_KEY") || strings.HasSuffix(name, "_TOKEN")
+}
+
+// scanKeys collects API-key-looking variables from the environment and dotfiles.
+func scanKeys() []keyHit {
+	seen := map[string]bool{}
+	var out []keyHit
+	add := func(name, val, src string) {
+		name = strings.TrimSpace(name)
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		if name == "" || val == "" || seen[name] || !looksLikeKey(name) {
+			return
+		}
+		seen[name] = true
+		out = append(out, keyHit{Name: name, FoundIn: src, Preview: mask(val), value: val})
+	}
+	for _, kv := range os.Environ() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			add(k, v, "environment")
+		}
+	}
+	files := []string{}
+	if home, _ := os.UserHomeDir(); home != "" {
+		for _, f := range []string{".zshrc", ".zshenv", ".bashrc", ".bash_profile", ".profile", ".env"} {
+			files = append(files, filepath.Join(home, f))
+		}
+	}
+	if cwd, _ := os.Getwd(); cwd != "" {
+		files = append(files, filepath.Join(cwd, ".env"))
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			t := strings.TrimSpace(line)
+			if strings.HasPrefix(t, "#") {
+				continue
+			}
+			t = strings.TrimPrefix(t, "export ")
+			if k, v, ok := strings.Cut(t, "="); ok {
+				add(k, v, f)
+			}
+		}
+	}
+	return out
+}
+
+type serverHit struct {
+	Endpoint string   `json:"endpoint"`
+	Models   []string `json:"models"`
+}
+
+// scanServers probes common local LLM server ports for OpenAI-compatible models.
+func scanServers() []serverHit {
+	candidates := []string{
+		"http://127.0.0.1:11434", "http://127.0.0.1:1234", "http://127.0.0.1:8000",
+		"http://127.0.0.1:8080", "http://127.0.0.1:4000", "http://127.0.0.1:5000",
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var hits []serverHit
+	for _, c := range candidates {
+		wg.Add(1)
+		go func(c string) {
+			defer wg.Done()
+			if base, models, err := provider.DiscoverModels(c, ""); err == nil && len(models) > 0 {
+				mu.Lock()
+				hits = append(hits, serverHit{base, models})
+				mu.Unlock()
+			}
+		}(c)
+	}
+	wg.Wait()
+	return hits
+}
+
+// Tools returns the configuration + discovery tools.
 func Tools() []core.Tool {
 	obj := func(props map[string]any, req ...string) map[string]any {
 		m := map[string]any{"type": "object", "properties": props}
@@ -47,6 +151,25 @@ func Tools() []core.Tool {
 
 	return []core.Tool{
 		{
+			Name:        "discover",
+			Description: "Auto-discover what's available to set up cheep: running local LLM servers (with their models) and API keys found in the environment/dotfiles (masked). Saves NOTHING. Use this first when helping a user get set up — then propose a configuration, ASK the user, and apply it with set_orchestrator / add_executor / copy_key.",
+			Parameters:  obj(map[string]any{}),
+			Func: func(context.Context, map[string]any) string {
+				keys := scanKeys()
+				foundMu.Lock()
+				for _, k := range keys {
+					foundKey[k.Name] = k.value
+				}
+				foundMu.Unlock()
+				b, _ := json.MarshalIndent(map[string]any{
+					"local_servers": scanServers(),
+					"api_keys":      keys,
+					"note":          "propose a setup, ask the user, then apply with set_orchestrator/add_executor and copy_key for a found key",
+				}, "", "  ")
+				return string(b)
+			},
+		},
+		{
 			Name:        "get_config",
 			Description: "Show cheep's current configuration (orchestrator + executors).",
 			Parameters:  obj(map[string]any{}),
@@ -57,7 +180,7 @@ func Tools() []core.Tool {
 		},
 		{
 			Name:        "discover_models",
-			Description: "Probe an endpoint (and optional access key) for the models it serves; confirms reachability.",
+			Description: "Probe a specific endpoint (and optional access key) for the models it serves; confirms reachability.",
 			Parameters:  obj(map[string]any{"endpoint": s, "api_key": s}, "endpoint"),
 			Func: func(_ context.Context, a map[string]any) string {
 				base, models, err := provider.DiscoverModels(str(a, "endpoint"), str(a, "api_key"))
@@ -126,6 +249,35 @@ func Tools() []core.Tool {
 					return "ERROR: " + err.Error()
 				}
 				return "removed " + str(a, "name") + " — applies on the next message"
+			},
+		},
+		{
+			Name:        "copy_key",
+			Description: "Save an API key that discover found into cheep (~/.cheep/keys.env) and the live session. ONLY call after the user grants permission.",
+			Parameters:  obj(map[string]any{"name": s}, "name"),
+			Func: func(_ context.Context, a map[string]any) string {
+				name := str(a, "name")
+				foundMu.Lock()
+				v := foundKey[name]
+				foundMu.Unlock()
+				if v == "" {
+					return "no value for " + name + " has been discovered — run discover first"
+				}
+				if err := config.SetKey(name, v); err != nil {
+					return "ERROR: " + err.Error()
+				}
+				return name + " saved to cheep and active now (no restart needed)"
+			},
+		},
+		{
+			Name:        "set_key",
+			Description: "Set an API key directly when the user provides the value. Saves to ~/.cheep/keys.env and the live session.",
+			Parameters:  obj(map[string]any{"name": s, "value": s}, "name", "value"),
+			Func: func(_ context.Context, a map[string]any) string {
+				if err := config.SetKey(str(a, "name"), str(a, "value")); err != nil {
+					return "ERROR: " + err.Error()
+				}
+				return str(a, "name") + " saved and active now"
 			},
 		},
 	}

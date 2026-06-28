@@ -163,6 +163,36 @@ func EnsureKeysTemplate() (string, error) {
 	return p, os.WriteFile(p, []byte(tmpl), 0o600)
 }
 
+// SetKey writes name=value to keys.env (replacing any existing entry) and sets it
+// in the current process environment, so it takes effect without a restart.
+func SetKey(name, value string) error {
+	p, err := KeysPath()
+	if err != nil {
+		return err
+	}
+	var kept []string
+	if b, e := os.ReadFile(p); e == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "#") {
+				body := strings.TrimPrefix(trimmed, "export ")
+				if k, _, ok := strings.Cut(body, "="); ok && strings.TrimSpace(k) == name {
+					continue // drop the old entry
+				}
+			}
+			kept = append(kept, line)
+		}
+	}
+	kept = append(kept, name+"="+value)
+	if h, e := Home(); e == nil {
+		_ = os.MkdirAll(h, 0o700)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(kept, "\n")+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Setenv(name, value)
+}
+
 func Exists() bool {
 	p, err := Path()
 	if err != nil {
