@@ -7,9 +7,12 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,9 +20,17 @@ import (
 
 	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/config"
+	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 )
+
+const bannerArt = ` ██████╗██╗  ██╗███████╗███████╗██████╗ ██╗
+██╔════╝██║  ██║██╔════╝██╔════╝██╔══██╗██║
+██║     ███████║█████╗  █████╗  ██████╔╝██║
+██║     ██╔══██║██╔══╝  ██╔══╝  ██╔═══╝ ╚═╝
+╚██████╗██║  ██║███████╗███████╗██║     ██╗
+ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚═╝`
 
 type evMsg core.Event
 type doneMsg struct{ r agent.RunResult }
@@ -46,10 +57,23 @@ type model struct {
 
 	vp      viewport.Model
 	input   textinput.Model
+	sp      spinner.Model
 	w, h    int
 	ready   bool
 	running bool
+	started time.Time
+	cancel  context.CancelFunc
 	footer  string
+
+	// overlay: "" (none) | "help" | "setup"
+	overlay string
+	ovTitle string
+	ovInput textinput.Model
+	ovVP    viewport.Model
+	ovSess  *agent.Session
+	ovState *configassist.State
+	ovLog   []string
+	ovBusy  bool
 }
 
 var (
@@ -78,6 +102,9 @@ func newModel(cfg config.Config, workdir string, events chan core.Event) model {
 	ti.Placeholder = "type a task, or /help"
 	ti.Focus()
 
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+
 	m := model{
 		cfg:     cfg,
 		workdir: workdir,
@@ -89,13 +116,36 @@ func newModel(cfg config.Config, workdir string, events chan core.Event) model {
 			default: // drop rather than block an agent if the UI falls behind
 			}
 		},
-		tabs:   []*tab{{id: "orchestrator", title: "orchestrator"}},
+		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg)}},
 		byName: map[string]int{"orchestrator": 0, "cheep": 0},
 		input:  ti,
+		sp:     sp,
 		vp:     viewport.New(80, 20),
 	}
 	(&m).rebuild(false)
 	return m
+}
+
+// welcomeLines renders the banner + a short status as the orchestrator tab's
+// opening content (it scrolls away as the conversation grows).
+func welcomeLines(cfg config.Config) []string {
+	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	out := []string{}
+	for _, l := range strings.Split(bannerArt, "\n") {
+		out = append(out, cyan.Render(l))
+	}
+	out = append(out, "", fmt.Sprintf("orchestrator: %s [%s]", cfg.Orchestrator.Model, cfg.Orchestrator.Provider))
+	if len(cfg.Executors) == 0 {
+		out = append(out, "mode: solo (orchestrator does the work itself)")
+	} else {
+		names := make([]string, len(cfg.Executors))
+		for i, e := range cfg.Executors {
+			names[i] = e.Name + " → " + e.Model
+		}
+		out = append(out, "executors: "+strings.Join(names, ", "))
+	}
+	out = append(out, hintSt.Render("Tips: shift+tab cycles modes · tab switches agents · /help"), "")
+	return out
 }
 
 func (m *model) rebuild(keep bool) {
@@ -121,6 +171,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.Width = msg.Width
 		m.vp.Height = max(3, msg.Height-3) // tab bar (1) + footer (2)
 		m.input.Width = msg.Width - 14
+		m.ovVP.Width = max(10, msg.Width-6)
+		m.ovVP.Height = max(3, msg.Height-7)
+		m.ovInput.Width = max(10, msg.Width-10)
 		m.ready = true
 		(&m).syncViewport()
 		return m, nil
@@ -131,15 +184,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.running = false
+		m.cancel = nil
 		m.tabs[0].status = statusKey(msg.r.Status)
 		m.footer = fmt.Sprintf("%s · %d turns · %d→%d tokens", msg.r.Status, msg.r.Turns, msg.r.InputTokens, msg.r.OutputTokens)
 		(&m).syncViewport()
 		return m, nil
 
+	case ovDoneMsg:
+		m.ovBusy = false
+		return m, nil
+
+	case spinner.TickMsg:
+		if !m.running {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.sp, cmd = m.sp.Update(msg)
+		return m, cmd
+
 	case tea.KeyMsg:
+		if m.overlay != "" {
+			return m.updateOverlay(msg)
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			if m.running && m.cancel != nil {
+				m.cancel()
+				m.footer = "cancelling…"
+			}
+			return m, nil
 		case "shift+tab":
 			m.mode = orchestrator.NextMode(m.mode)
 			(&m).rebuild(true)
@@ -179,6 +254,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.MouseMsg:
+		if m.overlay != "" {
+			m.ovVP, _ = m.ovVP.Update(msg)
+			return m, nil
+		}
 		m.vp, _ = m.vp.Update(msg)
 		m.follow = m.vp.AtBottom()
 		return m, nil
@@ -211,9 +290,13 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.active = 0
 	m.follow = true
 	m.running = true
+	m.started = time.Now()
 	(&m).syncViewport()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
 	s := m.session
-	return m, func() tea.Msg { return doneMsg{s.Send(text)} }
+	run := func() tea.Msg { return doneMsg{s.SendCtx(ctx, text)} }
+	return m, tea.Batch(m.sp.Tick, run)
 }
 
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
@@ -233,7 +316,7 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.mode = orchestrator.NextMode(m.mode)
 		(&m).rebuild(true)
 	case "/clear":
-		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator"}}
+		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg)}}
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
 		m.active = 0
 		(&m).rebuild(false)
@@ -241,12 +324,10 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		(&m).syncViewport()
 	case "/status":
 		m.footer = statusLine(m.cfg)
-	case "/config", "/setup":
-		m.footer = "run `cheep " + strings.TrimPrefix(strings.Fields(text)[0], "/") + "` in a normal terminal (wizard not available in the TUI yet)"
-	case "/help":
-		(&m).appendLine(m.active, "commands: /chat /plan /auto · /mode · /clear · /status · /exit")
-		(&m).appendLine(m.active, "keys: shift+tab=mode · tab=next agent · ctrl+←/→=agents · pgup/pgdn=scroll")
-		(&m).syncViewport()
+	case "/setup", "/config":
+		return m.openSetup()
+	case "/help", "/?":
+		m.overlay = "help"
 	default:
 		m.footer = "unknown command " + strings.Fields(text)[0]
 	}
@@ -271,6 +352,17 @@ func (m *model) appendLine(idx int, line string) {
 }
 
 func (m *model) applyEvent(e core.Event) {
+	// Setup-assistant events feed the overlay, not a tab.
+	if e.Agent == "setup" {
+		if line := formatEvent(e); line != "" {
+			m.ovLog = append(m.ovLog, line)
+			if m.overlay == "setup" {
+				m.ovVP.SetContent(strings.Join(m.ovLog, "\n"))
+				m.ovVP.GotoBottom()
+			}
+		}
+		return
+	}
 	idx := m.tabFor(e.Agent)
 	t := m.tabs[idx]
 	switch e.Type {
@@ -289,7 +381,11 @@ func (m *model) applyEvent(e core.Event) {
 	case "tool_call":
 		m.appendLine(idx, "→ "+e.Tool+"("+shortArgs(e.Args)+")")
 	case "tool_result":
-		m.appendLine(idx, "  ← "+short(e.Result, 300))
+		g := "✓"
+		if isErrResult(e.Result) {
+			g = "✗"
+		}
+		m.appendLine(idx, "  "+g+" "+short(e.Result, 200))
 	case "status":
 		m.appendLine(idx, "• "+e.Status)
 		if k := statusKey(e.Status); k != "" {
@@ -318,12 +414,21 @@ func (m model) View() string {
 	if !m.ready {
 		return "starting cheep…"
 	}
+	if m.overlay != "" {
+		return m.viewOverlay()
+	}
 	m.input.Prompt = modePrompt(m.mode)
-	hint := "shift+tab: mode · tab: agent · pgup/pgdn: scroll · /help"
-	if m.footer != "" {
-		hint = m.footer + "   " + hintSt.Render(hint)
+	var hint string
+	if m.running {
+		elapsed := int(time.Since(m.started).Seconds())
+		hint = hintSt.Render(fmt.Sprintf("%s working… (%ds · esc to cancel)", m.sp.View(), elapsed))
 	} else {
-		hint = hintSt.Render(hint)
+		base := "shift+tab: mode · tab: agent · pgup/pgdn: scroll · /help"
+		if m.footer != "" {
+			hint = m.footer + "   " + hintSt.Render(base)
+		} else {
+			hint = hintSt.Render(base)
+		}
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.tabBar(), m.vp.View(), m.input.View(), hint)
 }
@@ -365,6 +470,16 @@ func glyph(status string) string {
 		return "✗"
 	}
 	return "·"
+}
+
+func isErrResult(s string) bool {
+	if strings.HasPrefix(s, "ERROR") {
+		return true
+	}
+	if i := strings.Index(s, "exit="); i >= 0 && !strings.HasPrefix(s[i+5:], "0") {
+		return true
+	}
+	return false
 }
 
 func statusKey(s string) string {
