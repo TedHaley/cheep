@@ -20,6 +20,8 @@ import (
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/worktree"
+
+	"golang.org/x/term"
 )
 
 // version is stamped at build time by GoReleaser (-X main.version=...).
@@ -147,12 +149,34 @@ func cmdChat() {
 	if buildErr != nil {
 		fmt.Printf("%s%v%s\n", cYellow, buildErr, cReset)
 	}
-	fmt.Printf("%sChat / plan / auto modes. Type a task, or /help for commands. Ctrl-D or /exit to quit.%s\n", cDim, cReset)
+	fmt.Printf("%sshift+tab cycles modes (chat · plan · auto) · /help for commands · /exit to quit%s\n", cDim, cReset)
 	in := bufio.NewReader(os.Stdin)
+	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
+	prompt := func() string {
+		sym := "⏵⏵"
+		switch mode {
+		case orchestrator.ModeChat:
+			sym = "⏵"
+		case orchestrator.ModePlan:
+			sym = "⏸"
+		}
+		return fmt.Sprintf("%s%s %s ›%s ", cBold, sym, mode, cReset)
+	}
+	cycle := func() { mode = orchestrator.NextMode(mode); rebuild(true) }
+	nextLine := func() (string, bool) {
+		if isTTY {
+			return readLineRaw(int(os.Stdin.Fd()), prompt, cycle)
+		}
+		fmt.Print("\n" + prompt())
+		l, err := in.ReadString('\n')
+		if err != nil {
+			return "", false
+		}
+		return l, true
+	}
 	for {
-		fmt.Printf("\n%s%s ›%s ", cBold, mode, cReset)
-		line, err := in.ReadString('\n')
-		if err != nil { // EOF / Ctrl-D
+		line, ok := nextLine()
+		if !ok { // EOF / Ctrl-D
 			fmt.Println()
 			return
 		}
@@ -183,11 +207,7 @@ func cmdChat() {
 			case "/auto":
 				setMode(orchestrator.ModeAuto)
 			case "/mode":
-				setMode(map[orchestrator.Mode]orchestrator.Mode{
-					orchestrator.ModeChat: orchestrator.ModePlan,
-					orchestrator.ModePlan: orchestrator.ModeAuto,
-					orchestrator.ModeAuto: orchestrator.ModeChat,
-				}[mode])
+				setMode(orchestrator.NextMode(mode))
 			case "/setup":
 				if c, ok := runSetupAssistant(cfg, in); ok {
 					cfg = c
@@ -221,6 +241,66 @@ func cmdChat() {
 		r := session.Send(line)
 		fmt.Printf("%s[%s · %s · %d turns · %d→%d tokens]%s\n",
 			cDim, mode, r.Status, r.Turns, r.InputTokens, r.OutputTokens, cReset)
+	}
+}
+
+// readLineRaw reads one line in raw mode so Shift+Tab (ESC [ Z) can cycle modes
+// live without submitting. prompt() renders the current prompt; cycle() advances
+// the mode. Returns ok=false on Ctrl-D/Ctrl-C at an empty line or EOF.
+func readLineRaw(fd int, prompt func() string, cycle func()) (string, bool) {
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", false
+	}
+	defer term.Restore(fd, old)
+
+	var buf []byte
+	redraw := func() { fmt.Print("\r\x1b[K" + prompt() + string(buf)) }
+	fmt.Print("\n")
+	redraw()
+
+	var b [1]byte
+	for {
+		n, err := os.Stdin.Read(b[:])
+		if err != nil || n == 0 {
+			fmt.Print("\r\n")
+			return "", false
+		}
+		switch c := b[0]; c {
+		case 3: // Ctrl-C: clear the line, or exit if already empty
+			if len(buf) == 0 {
+				fmt.Print("\r\n")
+				return "", false
+			}
+			buf = buf[:0]
+			redraw()
+		case 4: // Ctrl-D
+			if len(buf) == 0 {
+				fmt.Print("\r\n")
+				return "", false
+			}
+		case '\r', '\n':
+			fmt.Print("\r\n")
+			return string(buf), true
+		case 127, 8: // backspace
+			if len(buf) > 0 {
+				buf = buf[:len(buf)-1]
+				redraw()
+			}
+		case 27: // escape sequence
+			var s [2]byte
+			if n1, _ := os.Stdin.Read(s[:1]); n1 == 1 && s[0] == '[' {
+				if n2, _ := os.Stdin.Read(s[1:2]); n2 == 1 && s[1] == 'Z' {
+					cycle() // Shift+Tab
+					redraw()
+				}
+			}
+		default:
+			if c >= 32 { // printable / UTF-8 byte
+				buf = append(buf, c)
+				fmt.Print(string(c))
+			}
+		}
 	}
 }
 

@@ -64,6 +64,18 @@ func ParseMode(s string) (Mode, bool) {
 	return "", false
 }
 
+// NextMode cycles chat → plan → auto → chat.
+func NextMode(m Mode) Mode {
+	switch m {
+	case ModeChat:
+		return ModePlan
+	case ModePlan:
+		return ModeAuto
+	default:
+		return ModeChat
+	}
+}
+
 const orchestratorSystemTmpl = `You are the orchestrator. You coordinate a fleet of cheaper
 executor agents to accomplish the user's task. You are expensive; the executors are cheap.
 Be economical: plan and delegate rather than doing the work yourself.

@@ -113,7 +113,8 @@ The interactive shell has three modes, switchable mid-conversation (your history
 - **plan** — read-only investigation; produces a step-by-step plan for you to approve.
 - **auto** — full autonomy: plan, delegate to executors, edit, and verify (the default).
 
-Slash commands: `/chat` `/plan` `/auto` (or `/mode` to cycle), plus `/setup`, `/config`,
+Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵⏵ auto`,
+`⏸ plan`, `⏵ chat`). Or use `/chat` `/plan` `/auto` / `/mode`, plus `/setup`, `/config`,
 `/status`, `/clear`, `/help`, `/exit`.
 
 ### Configure by chatting
