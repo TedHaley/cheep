@@ -38,7 +38,8 @@ type Agent struct {
 type Config struct {
 	Orchestrator Agent                 `json:"orchestrator"`
 	Executors    []Agent               `json:"executors"`
-	MCP          map[string]mcp.Server `json:"mcp,omitempty"` // name -> stdio MCP server
+	MCP          map[string]mcp.Server `json:"mcp,omitempty"` // name -> MCP server
+	KeepTabs     bool                  `json:"keep_tabs,omitempty"`
 }
 
 // Home is cheep's root directory (~/.cheep by default; override with CHEEP_HOME).

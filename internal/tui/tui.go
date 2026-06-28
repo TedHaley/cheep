@@ -79,6 +79,7 @@ type model struct {
 	openTodos int  // non-done todos from the orchestrator's latest update_todos
 	delegated bool // did the orchestrator call delegate this run?
 	nudges    int  // auto-continue count since the last user message
+	keepTabs  bool // keep finished executor tabs (else auto-close at turn end)
 
 	usage      map[string][2]int // model -> {input, output} tokens this session
 	usageOrder []string          // models in first-seen order
@@ -252,6 +253,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		mode:      orchestrator.ModeAuto,
 		extraOrch: extraOrch,
 		extraExec: extraExec,
+		keepTabs:  cfg.KeepTabs,
 		follow:    true,
 		onEvent: func(e core.Event) {
 			select {
@@ -400,6 +402,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = nil
 		m.tabs[0].status = statusKey(msg.r.Status)
 		m.footer = fmt.Sprintf("%s · %d turns · %d→%d tokens", msg.r.Status, msg.r.Turns, msg.r.InputTokens, msg.r.OutputTokens)
+		if m.keepTabs {
+			if len(m.tabs) > 1 {
+				m.footer += "   tab → executor, ctrl+w to close"
+			}
+		} else {
+			(&m).closeFinishedTabs()
+		}
 		(&m).syncViewport()
 		// Backstop: orchestrator stopped with unfinished todos and never delegated.
 		if m.mode == orchestrator.ModeAuto && len(m.cfg.Executors) > 0 &&
@@ -451,6 +460,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+w":
 			if m.active > 0 {
 				(&m).closeTab(m.active)
+			} else {
+				m.footer = "switch to an executor tab (tab) to close it"
 			}
 			return m, nil
 		case "shift+tab":
@@ -579,6 +590,15 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		} else {
 			(&m).closeTab(m.active)
 		}
+	case "/keeptabs":
+		m.keepTabs = !m.keepTabs
+		m.cfg.KeepTabs = m.keepTabs
+		_ = config.Save(m.cfg)
+		if m.keepTabs {
+			m.footer = "keep-tabs ON — finished executor tabs stay until closed"
+		} else {
+			m.footer = "keep-tabs OFF — finished executor tabs auto-close at turn end"
+		}
 	case "/clear":
 		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg)}}
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
@@ -623,6 +643,28 @@ func (m *model) tabFor(name string) int {
 
 func (m *model) appendLine(idx int, line string) {
 	m.tabs[idx].lines = append(m.tabs[idx].lines, line)
+}
+
+// closeFinishedTabs removes executor tabs that are no longer running.
+func (m *model) closeFinishedTabs() {
+	kept := []*tab{m.tabs[0]}
+	for _, t := range m.tabs[1:] {
+		if t.status == "run" || t.status == "" {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == len(m.tabs) {
+		return
+	}
+	m.tabs = kept
+	m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
+	for i, t := range m.tabs {
+		m.byName[t.id] = i
+	}
+	if m.active >= len(m.tabs) {
+		m.active = len(m.tabs) - 1
+	}
+	m.syncViewport()
 }
 
 // closeTab removes an executor tab (never the orchestrator at index 0).
@@ -679,6 +721,9 @@ func (m *model) applyEvent(e core.Event) {
 		} else {
 			t.status = statusKey(e.Status)
 			m.appendLine(idx, hintSt.Render("■ "+e.Status))
+			if m.keepTabs && idx != 0 {
+				m.appendLine(idx, hintSt.Render("done — ctrl+w or /close to close this tab"))
+			}
 		}
 	case "text":
 		if e.Text != "" {
