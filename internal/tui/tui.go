@@ -220,9 +220,9 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events, extraOrch, extraExec)
-	// No mouse tracking: lets the terminal handle native text selection/copy
-	// (mouse tracking would hijack drag-select and leak mouse escape codes).
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// Mouse on for wheel/trackpad scrolling. (To select/copy text, hold Option on
+	// macOS or Shift elsewhere to bypass mouse tracking.)
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	go func() {
 		for e := range events {
 			p.Send(evMsg(e))
@@ -726,7 +726,7 @@ func (m *model) applyEvent(e core.Event) {
 			}
 		}
 	case "text":
-		if e.Text != "" {
+		if strings.TrimSpace(e.Text) != "" {
 			for _, l := range renderMarkdown(e.Text, m.w) {
 				m.appendLine(idx, l)
 			}

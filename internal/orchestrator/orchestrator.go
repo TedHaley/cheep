@@ -29,9 +29,10 @@ list_dir, run_bash). Work autonomously and efficiently.
 For multi-step work, call update_todos to lay out the steps up front, then mark each
 in_progress/done as you go so your progress is visible.
 
-When the subtask is fully done, STOP calling tools and reply with a short summary of exactly
-what you did and how it can be verified. If you get blocked, stop and explain what is
-blocking you and why.`
+When the subtask is done, STOP calling tools and put your COMPLETE results directly in your
+final reply text — the orchestrator only sees that reply, so include the actual findings
+there. Do NOT write results to files (you run in an isolated workspace the orchestrator can't
+read). If you get blocked, stop and explain what is blocking you and why.`
 
 const soloSystem = `You are cheep, a capable autonomous coding agent. Complete the user's task
 directly using your tools (read_file, write_file, list_dir, run_bash). Plan briefly, make the
@@ -103,9 +104,13 @@ Be economical: plan and delegate rather than doing the work yourself.
   data gathering. NEVER fetch web pages, scrape, or call external services yourself (no
   curl/wget/web requests in run_bash); hand that to an executor. Do not write or edit files
   yourself either.
-- VERIFY every result yourself with read_file, list_dir and run_bash. Your own run_bash is
-  ONLY for verification of finished work (reading files, running local tests/builds) — never
-  for doing the task or reaching the network. Never trust a "done" report without checking.
+- READ THE RESULTS: each delegate result has an "output" field containing the executor's
+  findings — that IS the deliverable; use it directly. Executors run in isolation and share
+  NO files with you, so never look for files they "wrote" and never tell them to save to
+  /tmp; their answer comes back in "output". If an output is empty, re-delegate ONCE with
+  clearer instructions — do not loop.
+- VERIFY by reasoning over the returned outputs (and read_file/run_bash for LOCAL artifacts
+  only). Never trust a non-"completed" status without acting on it.
 - RECOVER when an executor returns a status other than "completed" (max_turns, looping,
   context_exhausted, error): split the subtask smaller, clarify it, or fix the blocker,
   then delegate again.
@@ -144,9 +149,10 @@ func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, lab
 	task := subtask
 	var totalIn, totalOut, totalTurns int
 	var r agent.RunResult
+	var sess *agent.Session
 	for attempt := 0; ; attempt++ {
 		ctx, cancel := context.WithTimeout(parent, e.timeout)
-		sess := e.newSession(workdir, label)
+		sess = e.newSession(workdir, label)
 		r = sess.SendCtx(ctx, task)
 		cancel()
 
@@ -168,6 +174,15 @@ func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, lab
 			Status: fmt.Sprintf("resuming after %s (attempt %d/%d)", r.Status, attempt+1, e.maxResumes)})
 		task = subtask + "\n\nA previous attempt was interrupted (" + r.Status + ").\n" +
 			"Progress so far:\n" + summary + "\n\nContinue from where it left off and finish the task."
+	}
+	// Salvage: a "completed" run with no final text still has findings in its
+	// history — summarize them so the orchestrator gets something usable.
+	if r.Status == "completed" && strings.TrimSpace(r.Output) == "" && sess != nil {
+		sctx, scancel := context.WithTimeout(parent, 60*time.Second)
+		if sum := strings.TrimSpace(sess.Summarize(sctx)); sum != "" {
+			r.Output = sum
+		}
+		scancel()
 	}
 	e.onEvent(core.Event{Agent: label, Type: "lifecycle", Status: r.Status})
 	return r
