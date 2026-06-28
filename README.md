@@ -1,17 +1,19 @@
 # cheep
 
-> Claude orchestrates. Local Qwen does the work. You pay almost nothing.
+> A smart lead agent orchestrates. Cheap local models do the work. You pay almost nothing.
 
-**cheep** is a tiny, single-binary CLI for multi-agent coding. One expensive, capable
-**orchestrator** (Claude) breaks your task into pieces, hands each to a free, local
-**executor** (Qwen via Ollama), verifies the work, and recovers any executor that gets
-stuck — loops, runs out of context, or errors out.
+**cheep** is a tiny, single-binary, interactive multi-agent coding shell. A lead
+**orchestrator** agent breaks a task into pieces, hands each to one or more **executor**
+agents (in parallel), verifies the work, and recovers any executor that gets stuck — loops,
+runs out of context, or errors out. Every role can point at an Anthropic or any
+OpenAI-compatible endpoint, so you can mix an expensive planner with free local workers — or
+run entirely local.
 
 Website & docs: **https://tedhaley.ca/cheep/**
 
 ## Install
 
-**Homebrew (macOS & Linux)**
+**Homebrew (macOS)**
 
 ```sh
 brew tap TedHaley/homebrew-tap
@@ -29,43 +31,98 @@ go install github.com/TedHaley/cheep@latest
 ## Quick start
 
 ```sh
-ollama serve &
-ollama pull qwen2.5-coder
-export ANTHROPIC_API_KEY=sk-ant-...
-
-cheep check                                  # ping both endpoints
-cheep run "add a /health endpoint" --workdir .
+cheep            # first run walks you through setup, then drops you in the shell
 ```
+
+On first launch cheep asks you to configure an **orchestrator** and, optionally, one or
+more **executors**. Then you get an interactive prompt:
+
+```
+› build a small CLI todo app with tests
+```
+
+Type a task and the orchestrator plans, delegates, verifies, and reports back.
 
 ## Configuration
 
-All via environment variables (defaults shown):
+cheep keeps everything in its home directory, **`~/.cheep/`** (override with `CHEEP_HOME`):
 
-| Variable | Default |
+```
+~/.cheep/
+├── config.json   # your agents (orchestrator + executors)
+└── keys.env      # your API keys, loaded automatically on startup
+```
+
+**Set it up** — run the wizard any time:
+
+```sh
+cheep config              # interactive setup / reconfigure
+cheep config show         # print the current setup
+cheep config path         # print the config file location
+```
+
+The wizard asks for an **orchestrator** (blank endpoint = Anthropic/Claude; or paste any
+OpenAI-compatible endpoint), then optionally lets you add **executors**. For executors you
+give only an **endpoint + access key** — cheep detects the model behind it automatically.
+If you configure no executors, the orchestrator runs **solo** and does the work itself.
+
+**Keys** — store them once in `~/.cheep/keys.env` instead of exporting them:
+
+```sh
+cheep keys                # creates the file and prints its path
+```
+
+```ini
+# ~/.cheep/keys.env  (one KEY=value per line, loaded on startup)
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Anything exported in your shell takes precedence over `keys.env`. Executor keys can also be
+saved inline during `cheep config`.
+
+**Check connectivity** at any time:
+
+```sh
+cheep check               # pings the orchestrator and every executor
+```
+
+### Example: Claude orchestrator + local Qwen executor
+
+1. `cheep config` → leave the orchestrator endpoint blank (Claude), choose a model.
+2. Add an executor → endpoint `http://127.0.0.1:1234`, blank key → cheep detects the model.
+3. Put `ANTHROPIC_API_KEY=sk-ant-...` in `~/.cheep/keys.env`.
+4. `cheep` → start working.
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| `ANTHROPIC_API_KEY` | — (required) |
-| `CHEEP_ORCHESTRATOR_MODEL` | `claude-sonnet-4-6` |
-| `CHEEP_EXECUTOR_MODEL` | `qwen2.5-coder` |
-| `CHEEP_EXECUTOR_BASE_URL` | `http://localhost:11434/v1` |
-| `CHEEP_EXECUTOR_API_KEY` | `ollama` |
-| `CHEEP_EXECUTOR_TOKEN_BUDGET` | `100000` |
+| `cheep` | Start the interactive shell (slash commands: `/config`, `/status`, `/clear`, `/help`, `/exit`) |
+| `cheep run "<task>" [--workdir DIR]` | Run a single task non-interactively |
+| `cheep check` | Ping the orchestrator and every executor |
+| `cheep config [show\|path]` | Set up or inspect your agents |
+| `cheep keys` | Show/create the key store |
+| `cheep version` | Print the version |
 
 ## How it works
 
 ```
-            ┌──────────────┐   delegate_to_executor   ┌──────────────┐
-   task ──▶ │ orchestrator │ ───────────────────────▶ │  executor    │
-            │   (Claude)   │ ◀─────────────────────── │   (Qwen)     │
-            └──────────────┘   status + summary        └──────────────┘
+            ┌──────────────┐   delegate (parallel)   ┌──────────────┐
+   task ──▶ │ orchestrator │ ──────────────────────▶ │  executor(s) │
+            │  (planner)   │ ◀────────────────────── │  (workers)   │
+            └──────────────┘   status + summary       └──────────────┘
                   │  verifies with read_file / run_bash
                   ▼
               final answer
 ```
 
 The orchestrator and executors share one generic agent loop (`internal/agent`) over two
-provider backends (`internal/provider`: Anthropic + any OpenAI-compatible endpoint). Each
-executor run returns a status — `completed`, `max_turns`, `looping`, `context_exhausted`,
-or `error` — which the orchestrator uses to decide whether to accept the work or recover it.
+provider backends (`internal/provider`: Anthropic + any OpenAI-compatible endpoint). The
+orchestrator's `delegate` tool fans subtasks out across executors **in parallel**; when the
+workspace is a git repo, each runs in its own **worktree** and its changes are merged back
+automatically (`internal/worktree`). Executor file access is **confined to the workspace**.
+Each run returns a status — `completed`, `max_turns`, `looping`, `context_exhausted`, or
+`error` — which the orchestrator uses to accept the work or recover it.
 
 ## Build from source
 
