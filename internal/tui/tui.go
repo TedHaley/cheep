@@ -818,11 +818,13 @@ func (m model) View() string {
 		hint = left + strings.Repeat(" ", gap) + tok
 	}
 	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
-	parts := []string{m.tabBar()}
-	if header := todoHeaderLines(m.tabs[m.active].todos); len(header) > 0 {
-		parts = append(parts, strings.Join(header, "\n"))
+	// Banner stays at the top of the scrolling log; the todo checklist is a sticky
+	// panel just above the input.
+	parts := []string{m.tabBar(), m.vp.View()}
+	if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
+		parts = append(parts, strings.Join(todos, "\n"))
 	}
-	parts = append(parts, m.vp.View(), rule, m.input.View(), rule, hint)
+	parts = append(parts, rule, m.input.View(), rule, hint)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
