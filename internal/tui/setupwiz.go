@@ -524,6 +524,17 @@ func (m model) viewWiz() string {
 		lines = append(lines, hintSt.Render("enter to save"))
 	}
 
+	// Same-backend caveat: an executor on the orchestrator's endpoint serializes.
+	if w.orch >= 0 && w.orch < len(w.cands) {
+		oc := w.cands[w.orch]
+		for i := range w.cands {
+			if w.execs[i] && w.cands[i].provider == oc.provider && w.cands[i].endpoint == oc.endpoint {
+				lines = append(lines, hintSt.Render("note: an executor shares the orchestrator's endpoint — those calls run one at a time; add another backend for true parallelism"))
+				break
+			}
+		}
+	}
+
 	lines = append(lines, "",
 		hintSt.Render("↑/↓ move · o orchestrator · e executor · enter save · m manual · esc cancel"))
 	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
