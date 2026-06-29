@@ -110,6 +110,10 @@ the conversation prefix, so the repeated context across an agent's many turns is
 fraction of the input price. OpenAI-compatible endpoints (DeepSeek, etc.) cache automatically
 server-side. The cost meter reflects the savings.
 
+**Budget cap** — set an optional session ceiling with `/budget 5` (or `"budget_usd": 5` in
+`config.json`). cheep warns at 80% and stops the running task at 100%; `/budget` shows the
+current spend, `/budget off` clears it.
+
 **Check connectivity** at any time:
 
 ```sh

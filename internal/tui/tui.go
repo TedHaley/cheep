@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -85,10 +86,11 @@ type model struct {
 	queue   []string // messages typed while a task is running
 	footer  string
 
-	openTodos int  // non-done todos from the orchestrator's latest update_todos
-	delegated bool // did the orchestrator call delegate this run?
-	nudges    int  // auto-continue count since the last user message
-	keepTabs  bool // keep finished executor tabs (else auto-close at turn end)
+	openTodos    int  // non-done todos from the orchestrator's latest update_todos
+	delegated    bool // did the orchestrator call delegate this run?
+	nudges       int  // auto-continue count since the last user message
+	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
+	budgetWarned bool // already warned at 80% of the budget cap this session
 
 	pendingCfg config.Config // last config we tried to switch to (avoid re-verifying)
 
@@ -541,6 +543,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: finishing open todos"))
 		}
 		if len(m.queue) > 0 { // run the next queued message
+			if m.overBudget() {
+				m.footer = "budget cap reached — raise with /budget to run queued messages"
+				return m, nil
+			}
 			next := m.queue[0]
 			m.queue = m.queue[1:]
 			m.nudges, m.openTodos = 0, 0
@@ -700,6 +706,14 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		(&m).syncViewport()
 		return m, nil
 	}
+	if m.overBudget() {
+		(&m).appendLine(0, userSt.Render("› "+text))
+		(&m).appendLine(0, errSt.Render("✗ over budget")+hintSt.Render(fmt.Sprintf(
+			" — %s of %s spent; raise or clear the cap with /budget", usd(m.spent()), usd(m.cfg.BudgetUSD))))
+		m.active, m.follow = 0, true
+		(&m).syncViewport()
+		return m, nil
+	}
 	m.nudges = 0
 	m.openTodos = 0
 	m.tabs[0].todos = nil // dismiss the previous task's checklist
@@ -773,6 +787,28 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		(&m).syncViewport()
 	case "/history", "/resume":
 		return m.openHistory()
+	case "/budget":
+		f := strings.Fields(text)
+		switch {
+		case len(f) < 2:
+			if m.cfg.BudgetUSD > 0 {
+				m.footer = fmt.Sprintf("budget: %s of %s used", usd(m.spent()), usd(m.cfg.BudgetUSD))
+			} else {
+				m.footer = "no budget cap — set one with /budget 5  (or /budget off)"
+			}
+		case f[1] == "off" || f[1] == "none" || f[1] == "0":
+			m.cfg.BudgetUSD, m.budgetWarned = 0, false
+			_ = config.Save(m.cfg)
+			m.footer = "budget cap cleared"
+		default:
+			if v, err := strconv.ParseFloat(strings.TrimPrefix(f[1], "$"), 64); err == nil && v > 0 {
+				m.cfg.BudgetUSD, m.budgetWarned = v, false
+				_ = config.Save(m.cfg)
+				m.footer = "budget cap set to " + usd(v) + " per session"
+			} else {
+				m.footer = "usage: /budget <dollars> | off"
+			}
+		}
 	case "/status":
 		for _, l := range statusLines(m.cfg) {
 			m.appendLine(m.active, l)
@@ -812,6 +848,30 @@ func (m *model) tabFor(name string) int {
 
 func (m *model) appendLine(idx int, line string) {
 	m.tabs[idx].lines = append(m.tabs[idx].lines, line)
+}
+
+// overBudget reports whether estimated session spend has hit the cap.
+func (m model) overBudget() bool {
+	return m.cfg.BudgetUSD > 0 && m.spent() >= m.cfg.BudgetUSD
+}
+
+// enforceBudget warns at 80% of the cap and cancels a running task at 100%.
+func (m *model) enforceBudget() {
+	if m.cfg.BudgetUSD <= 0 {
+		return
+	}
+	sp := m.spent()
+	switch {
+	case sp >= m.cfg.BudgetUSD:
+		if m.running && m.cancel != nil {
+			m.cancel()
+			m.footer = errSt.Render(fmt.Sprintf("✗ budget cap %s reached (%s) — stopping; raise with /budget",
+				usd(m.cfg.BudgetUSD), usd(sp)))
+		}
+	case !m.budgetWarned && sp >= 0.8*m.cfg.BudgetUSD:
+		m.budgetWarned = true
+		m.footer = fmt.Sprintf("⚠ %s of %s budget used", usd(sp), usd(m.cfg.BudgetUSD))
+	}
 }
 
 // closeFinishedTabs removes executor tabs that are no longer running.
@@ -873,6 +933,7 @@ func (m *model) applyEvent(e core.Event) {
 			r[1] += e.OutTok
 			m.usageRole[role] = r
 		}
+		m.enforceBudget()
 		return
 	}
 	// Setup-assistant events feed the overlay, not a tab.
@@ -1197,7 +1258,11 @@ func (m model) tokenSummary() string {
 		parts = append(parts, "exec "+human(et))
 	}
 	s := "Σ " + strings.Join(parts, " · ")
-	if spent := m.spent(); spent > 0 {
+	spent := m.spent()
+	switch {
+	case m.cfg.BudgetUSD > 0:
+		s += " · " + usd(spent) + "/" + usd(m.cfg.BudgetUSD)
+	case spent > 0:
 		s += " · " + usd(spent)
 	}
 	return s
@@ -1250,6 +1315,14 @@ func (m model) tokenLines() []string {
 		out = append(out, todoDoneSt.Render(fmt.Sprintf(
 			"   %s tokens ran free on local models — ≈ %s saved at %s rates",
 			human(int(freeTokens)), usd(savings), refLabel)))
+	}
+	if m.cfg.BudgetUSD > 0 {
+		line := fmt.Sprintf("   budget cap: %s of %s used", usd(spent), usd(m.cfg.BudgetUSD))
+		if m.overBudget() {
+			out = append(out, errSt.Render(line+" — reached"))
+		} else {
+			out = append(out, hintSt.Render(line))
+		}
 	}
 	out = append(out, hintSt.Render("   estimates only — set price_in/price_out per agent to tune"))
 	return out

@@ -49,6 +49,10 @@ type Config struct {
 	// DisableEscalate turns off cheap-first escalation (retrying a failed subtask
 	// on a more capable executor). Escalation is on by default.
 	DisableEscalate bool `json:"disable_escalate,omitempty"`
+
+	// BudgetUSD caps estimated session spend in US dollars (0 = no cap). cheep
+	// warns at 80% and stops the run at 100%.
+	BudgetUSD float64 `json:"budget_usd,omitempty"`
 }
 
 // Home is cheep's root directory (~/.cheep by default; override with CHEEP_HOME).
