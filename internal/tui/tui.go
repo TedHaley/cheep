@@ -296,10 +296,10 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
 	(&m).rebuild(false)
-	if firstRun || !orchestratorUsable(m.cfg) {
-		// No config, or the orchestrator can't run (e.g. Claude with no key) —
-		// open the configurator over the banner. Any rescue session stays
-		// underneath as a fallback if the user escapes.
+	if firstRun || needsSetup(m.cfg) {
+		// No config, the orchestrator can't run, or no executor is configured —
+		// cheep needs both roles, so open the configurator to set up the missing
+		// piece. Any rescue session stays underneath as a fallback.
 		m.overlay = "setupwiz"
 		m.wiz = newWizState()
 	} else if m.buildErr != nil {
@@ -346,7 +346,7 @@ func welcomeLines(cfg config.Config, conn map[string]string) []string {
 	}
 	info := []string{"orchestrator | " + mark("orchestrator", cfg.Orchestrator.Model)}
 	if len(cfg.Executors) == 0 {
-		info = append(info, "executors    | none — orchestrator runs everything itself")
+		info = append(info, "executors    | "+errSt.Render("none — finish setup in /config"))
 	}
 	// Collapse interchangeable executors (same model) into one line; the model
 	// picks which instance to use, so the type is what matters.
@@ -425,6 +425,12 @@ func orchestratorUsable(cfg config.Config) bool {
 		return false
 	}
 	return true
+}
+
+// needsSetup is true when cheep is missing a usable orchestrator OR any executor.
+// cheep always wants both roles configured.
+func needsSetup(cfg config.Config) bool {
+	return !orchestratorUsable(cfg) || len(cfg.Executors) == 0
 }
 
 type probeMsg map[string]string

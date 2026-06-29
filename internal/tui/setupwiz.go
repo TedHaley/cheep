@@ -51,11 +51,10 @@ type wizState struct {
 	orch    int // index into cands, -1 = none chosen
 	execs   map[int]bool
 
-	fields      []textinput.Model // manual form inputs
-	focus       int
-	manualProv  int  // selected provider in the manual provider list
-	confirmSolo bool // user pressed enter with no executors; confirm solo on the next
-	err         string
+	fields     []textinput.Model // manual form inputs
+	focus      int
+	manualProv int // selected provider in the manual provider list
+	err        string
 
 	keyInput textinput.Model // "key" mode: paste an Anthropic key for a keyless pick
 	pending  config.Config   // config awaiting the pasted key
@@ -193,7 +192,7 @@ func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		if len(w.cands) > 0 {
 			w.orch = w.cursor
-			w.err, w.confirmSolo = "", false
+			w.err = ""
 		}
 	case "e", " ":
 		if len(w.cands) > 0 {
@@ -202,7 +201,7 @@ func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				w.execs[w.cursor] = true
 			}
-			w.confirmSolo = false
+			w.err = ""
 		}
 	case "m":
 		return m.enterManual()
@@ -334,27 +333,23 @@ func (m model) saveWizard() (tea.Model, tea.Cmd) {
 		w.err = "pick an orchestrator first (move with ↑/↓, press o)"
 		return m, nil
 	}
-	// Guide toward adding executors: if other models are available but none are
-	// tagged, ask the user to confirm solo before saving.
-	hasExec, availExec := false, 0
+	// cheep needs both roles — require at least one executor. The orchestrator's
+	// own model may be reused as an executor (tag the same row with e).
+	execCount := 0
 	for i := range w.cands {
-		if i == w.orch {
-			continue
-		}
-		availExec++
 		if w.execs[i] {
-			hasExec = true
+			execCount++
 		}
 	}
-	if !hasExec && availExec > 0 && !w.confirmSolo {
-		w.confirmSolo = true
+	if execCount == 0 {
+		w.err = "add at least one executor (press e) — cheep runs an orchestrator + executors"
 		return m, nil
 	}
 	oc := w.cands[w.orch]
 	cfg := config.Config{Orchestrator: config.Agent{Provider: oc.provider, Endpoint: oc.endpoint, Model: oc.model, APIKey: oc.key}}
 	n := 1
 	for i := range w.cands {
-		if i == w.orch || !w.execs[i] {
+		if !w.execs[i] {
 			continue
 		}
 		e := w.cands[i]
@@ -499,20 +494,23 @@ func (m model) viewWiz() string {
 		orchName = short(w.cands[w.orch].model, 28)
 	}
 	var execNames []string
-	availExec, suggest := 0, ""
 	for i := range w.cands {
-		if i == w.orch {
-			continue
-		}
-		availExec++
-		if suggest == "" {
-			suggest = short(w.cands[i].model, 22)
-		}
 		if w.execs[i] {
 			execNames = append(execNames, short(w.cands[i].model, 20))
 		}
 	}
-	execPart := "none (solo)"
+	// Suggest an executor: prefer a model other than the orchestrator, else reuse it.
+	suggest := ""
+	for i := range w.cands {
+		if i != w.orch {
+			suggest = short(w.cands[i].model, 22)
+			break
+		}
+	}
+	if suggest == "" && w.orch >= 0 {
+		suggest = short(w.cands[w.orch].model, 16) + " (same model)"
+	}
+	execPart := "none"
 	if len(execNames) > 0 {
 		execPart = strings.Join(execNames, ", ")
 	}
@@ -520,12 +518,8 @@ func (m model) viewWiz() string {
 	switch {
 	case w.orch < 0:
 		lines = append(lines, hintSt.Render("step 1 — press o to choose the orchestrator"))
-	case len(execNames) == 0 && availExec == 0:
-		lines = append(lines, hintSt.Render("only one model available — it'll run solo · enter to save"))
-	case len(execNames) == 0 && w.confirmSolo:
-		lines = append(lines, errSt.Render("no executors — press enter again to run solo, or e to add one"))
 	case len(execNames) == 0:
-		lines = append(lines, hintSt.Render("step 2 — press e to add an executor (e.g. "+suggest+"), or enter for solo"))
+		lines = append(lines, hintSt.Render("step 2 — press e to add an executor (e.g. "+suggest+")"))
 	default:
 		lines = append(lines, hintSt.Render("enter to save"))
 	}
