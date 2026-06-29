@@ -84,6 +84,9 @@ func (m model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.overlay == "setupwiz" {
 		return m.updateWiz(msg)
 	}
+	if m.overlay == "history" {
+		return m.updateHistory(msg)
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -125,6 +128,9 @@ func (m model) viewOverlay() string {
 	if m.overlay == "setupwiz" {
 		return m.viewWiz()
 	}
+	if m.overlay == "history" {
+		return m.viewHistory()
+	}
 	title := lipgloss.NewStyle().Bold(true).Render(m.ovTitle)
 	m.ovInput.Prompt = "setup › "
 	hint := hintSt.Render("Enter: send · Esc or /done: finish · pgup/pgdn: scroll")
@@ -151,6 +157,7 @@ func (m model) viewHelp() string {
 		"  /setup           configure by chatting with a working agent",
 		"  /status          show current setup",
 		"  /tokens          token usage per model (and local savings)",
+		"  /history /resume browse and resume past conversations",
 		"  /clear           reset the conversation",
 		"  /help            this panel        /exit  quit",
 		"",

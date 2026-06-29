@@ -28,6 +28,7 @@ import (
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/provider"
 )
@@ -108,6 +109,13 @@ type model struct {
 	ovBusy  bool
 
 	wiz wizState // discovery configurator (/config and first launch)
+
+	// chat history (persisted to ~/.cheep/history; global timeline)
+	histID      string
+	histStarted time.Time
+	histTitle   string
+	histList    []history.Meta // populated when the /history overlay is open
+	histCursor  int
 }
 
 var (
@@ -285,6 +293,8 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		sp:     sp,
 		vp:     viewport.New(80, 20),
 	}
+	m.histStarted = time.Now()
+	m.histID = history.NewID(m.histStarted)
 	(&m).rebuild(false)
 	if firstRun {
 		// No config yet — open the discovery configurator over the banner.
@@ -491,6 +501,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(&m).closeFinishedTabs()
 		}
 		(&m).syncViewport()
+		(&m).saveHistory() // persist the conversation after every completed turn
 		// The orchestrator may have rewired cheep via the config tools. Verify the
 		// new orchestrator is reachable BEFORE switching to it (don't brick the
 		// session); applied in the switchMsg handler.
@@ -566,6 +577,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "ctrl+c":
+			(&m).saveHistory()
 			return m, tea.Quit
 		case "esc":
 			if m.running && m.cancel != nil {
@@ -727,13 +739,20 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 			m.footer = "keep-tabs OFF — finished executor tabs auto-close at turn end"
 		}
 	case "/clear":
+		(&m).saveHistory() // keep the conversation we're clearing
 		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg, m.connectivity)}}
 		m.welcomeLen = len(m.tabs[0].lines)
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
 		m.active = 0
 		(&m).rebuild(false)
+		// start a fresh history session
+		m.histStarted = time.Now()
+		m.histID = history.NewID(m.histStarted)
+		m.histTitle = ""
 		m.footer = "(cleared)"
 		(&m).syncViewport()
+	case "/history", "/resume":
+		return m.openHistory()
 	case "/status":
 		for _, l := range statusLines(m.cfg) {
 			m.appendLine(m.active, l)
