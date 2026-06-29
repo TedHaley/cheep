@@ -105,6 +105,11 @@ ones can't cope. Executors are ranked by estimated cost (local first); each resu
 `"escalation"` trail (e.g. `qwen:looping → deepseek:completed`) when it happened. Turn it off
 with `"disable_escalate": true` in `config.json`.
 
+**Prompt caching** — on Anthropic roles, cheep caches the system prompt, tool definitions, and
+the conversation prefix, so the repeated context across an agent's many turns is billed at a
+fraction of the input price. OpenAI-compatible endpoints (DeepSeek, etc.) cache automatically
+server-side. The cost meter reflects the savings.
+
 **Check connectivity** at any time:
 
 ```sh
