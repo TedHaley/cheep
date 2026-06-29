@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cheep — cheap local executors, smart cloud orchestrator</title>
-<meta name="description" content="cheep is a tiny CLI where Claude orchestrates and verifies the work of free local Qwen executor agents.">
+<title>cheep — a multi-agent coding shell you can watch</title>
+<meta name="description" content="cheep is a single-binary terminal app where a smart orchestrator agent plans, delegates and verifies, and cheap local (or cloud) executor agents do the work — all visible in a tab per agent.">
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
@@ -35,12 +35,16 @@
     padding: 16px; overflow-x: auto; font-size: 14px;
   }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  p code, li code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+  p code, li code, td code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font-size: 14px; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .card .who { font-weight: 600; }
+  .card .who { font-weight: 600; margin-bottom: 4px; }
   .card.cheap .who { color: var(--green); }
   .card.smart .who { color: var(--cyan); }
+  .card .who small { color: var(--muted); font-weight: 400; }
+  ul.feat { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
+  ul.feat li { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  ul.feat b { color: var(--fg); }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; }
@@ -62,7 +66,7 @@
 
   <header>
     <h1><span class="bird">~</span>cheep</h1>
-    <div class="tag">Claude orchestrates. Local Qwen does the work. You pay almost nothing.</div>
+    <div class="tag">A smart orchestrator plans and verifies. Cheap executors do the work.<br>Mix cloud and local — or run entirely local for almost nothing.</div>
     <div class="badges">
       <a href="https://github.com/TedHaley/cheep">GitHub</a>
       <a href="#install">Install</a>
@@ -72,20 +76,41 @@
 
   <section>
     <h2>What is it?</h2>
-    <p><strong>cheep</strong> is a tiny, single-binary CLI for multi-agent coding. One expensive,
-    capable <em>orchestrator</em> (Claude) breaks your task into pieces, hands each to a free,
-    local <em>executor</em> (Qwen via Ollama), then verifies the work and recovers any executor
-    that gets stuck — loops, runs out of context, or errors out.</p>
+    <p><strong>cheep</strong> is a tiny, single-binary, interactive multi-agent coding shell for
+    your terminal. A lead <em>orchestrator</em> agent breaks a task into pieces, hands each to one
+    or more <em>executor</em> agents (in parallel), verifies the work, and recovers any executor
+    that gets stuck — loops, runs out of context, or errors out. You watch it happen, with a tab
+    per agent.</p>
     <div class="grid">
       <div class="card smart">
-        <div class="who">Orchestrator — Claude</div>
-        Plans, delegates, and verifies. Reads files and runs tests to check the work. Never edits code itself.
+        <div class="who">Orchestrator</div>
+        Plans, delegates, and verifies. Reads files and runs tests to check the work — but never
+        edits code itself. Best with a strong model.
       </div>
       <div class="card cheap">
-        <div class="who">Executors — local Qwen</div>
-        Do the actual editing and running. Free and unlimited on your own hardware.
+        <div class="who">Executors</div>
+        Do the actual editing and running, in parallel. Point them at free local models and the
+        work costs nothing.
       </div>
     </div>
+    <p style="margin-top:14px"><strong>Provider-agnostic.</strong> Any role can be Anthropic
+    (Claude) or any OpenAI-compatible endpoint — local (Ollama, LM Studio, vLLM, llama.cpp) or
+    cloud (OpenAI, Grok/xAI, DeepSeek, Groq, OpenRouter, Mistral, …). Mix an expensive planner
+    with free local workers, or run the whole thing locally.</p>
+  </section>
+
+  <section>
+    <h2>Why cheep</h2>
+    <ul class="feat">
+      <li><b>Watch every agent.</b> A tab per agent with live output; see what's delegated to whom and step in any time.</li>
+      <li><b>See the savings.</b> A running token counter splits usage by orchestrator vs executors and marks local tokens as free.</li>
+      <li><b>Modes.</b> <code>shift+tab</code> cycles chat → plan (read-only) → auto (full multi-agent delegation).</li>
+      <li><b>Self-healing.</b> Executors that loop, exhaust their context, or error are detected and recovered automatically.</li>
+      <li><b>Resumable history.</b> Conversations are saved as transcripts; resume any past session with <code>/history</code>.</li>
+      <li><b>Zero-config start.</b> First launch discovers local model servers and API keys on your machine and walks you through setup.</li>
+      <li><b>Tools &amp; MCP.</b> Built-in file/shell tools, plus connect MCP servers to give every agent more capabilities.</li>
+      <li><b>One static binary.</b> No runtime, no dependencies. <code>brew install</code>, <code>go install</code>, or download.</li>
+    </ul>
   </section>
 
   <section id="install">
@@ -110,31 +135,34 @@ brew install cheep</code></pre>
 
   <section>
     <h2>Quick start</h2>
-    <pre><code># 1. Run a local model with an OpenAI-compatible endpoint
+    <pre><code># 1. (optional) run a local model — any OpenAI-compatible server works
+#    e.g. Ollama, LM Studio, vLLM, llama.cpp
 ollama serve &amp;
 ollama pull qwen2.5-coder
 
-# 2. Give Claude an API key
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# 3. Check both ends are reachable
-cheep check
-
-# 4. Hand it a task
-cheep run "add a /health endpoint and a test for it" --workdir .</code></pre>
+# 2. launch cheep
+cheep</code></pre>
+    <p>On first launch cheep opens a <strong>setup configurator</strong>: it scans your machine for
+    running model servers and API keys, and you pick an <strong>orchestrator</strong> and at least
+    one <strong>executor</strong> — or enter cloud credentials manually (Anthropic, OpenAI, Grok,
+    DeepSeek, …). Then you're in the shell. Reopen it any time with <code>/config</code>.</p>
+    <p>Prefer one-shot, non-interactive runs?</p>
+    <pre><code>cheep run "add a /health endpoint and a test for it" --workdir .</code></pre>
   </section>
 
   <section>
     <h2>Configuration</h2>
-    <p>Everything is environment variables, with sane defaults (Claude Sonnet + local Qwen on Ollama):</p>
+    <p>There are no required environment variables. cheep stores its setup in
+    <code>~/.cheep/config.json</code> and API keys in <code>~/.cheep/keys.env</code> (0600). You
+    configure agents interactively, not by hand.</p>
     <table>
-      <tr><th>Variable</th><th>Default</th></tr>
-      <tr><td><code>ANTHROPIC_API_KEY</code></td><td>— (required)</td></tr>
-      <tr><td><code>CHEEP_ORCHESTRATOR_MODEL</code></td><td>claude-sonnet-4-6</td></tr>
-      <tr><td><code>CHEEP_EXECUTOR_MODEL</code></td><td>qwen2.5-coder</td></tr>
-      <tr><td><code>CHEEP_EXECUTOR_BASE_URL</code></td><td>http://localhost:11434/v1</td></tr>
-      <tr><td><code>CHEEP_EXECUTOR_API_KEY</code></td><td>ollama</td></tr>
-      <tr><td><code>CHEEP_EXECUTOR_TOKEN_BUDGET</code></td><td>100000</td></tr>
+      <tr><th>Command</th><th>What it does</th></tr>
+      <tr><td><code>cheep</code></td><td>Interactive shell (opens setup on first run)</td></tr>
+      <tr><td><code>/config</code></td><td>In-app configurator: discover local servers + keys, or enter cloud credentials</td></tr>
+      <tr><td><code>/history</code></td><td>Browse and resume past conversations</td></tr>
+      <tr><td><code>cheep run "&lt;task&gt;"</code></td><td>Run a single task non-interactively</td></tr>
+      <tr><td><code>cheep check</code></td><td>Ping the orchestrator and every executor</td></tr>
+      <tr><td><code>cheep keys</code></td><td>Show the key store</td></tr>
     </table>
   </section>
 
