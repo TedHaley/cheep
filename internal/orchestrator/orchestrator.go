@@ -18,6 +18,7 @@ import (
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tool"
 	"github.com/TedHaley/cheep/internal/worktree"
@@ -117,9 +118,10 @@ Be economical: plan and delegate rather than doing the work yourself.
   clearer instructions — do not loop.
 - VERIFY by reasoning over the returned outputs (and read_file/run_bash for LOCAL artifacts
   only). Never trust a non-"completed" status without acting on it.
-- RECOVER when an executor returns a status other than "completed" (max_turns, looping,
-  context_exhausted, error): split the subtask smaller, clarify it, or fix the blocker,
-  then delegate again.
+- RECOVER when an executor returns a status other than "completed": cheep already
+  auto-escalates a failed subtask to a more capable executor before returning (see the
+  "escalation" field), so a non-"completed" result means even the strongest tier struggled —
+  split the subtask smaller, clarify it, or fix the blocker, then delegate again.
 - Plan, delegate, and verify — that is your whole job.
 - To CHANGE cheep's setup (switch your own model, add/remove executors, add API keys) when
   the user asks, use the config tools: discover (find local servers + keys), get_config,
@@ -227,6 +229,23 @@ func usable(a config.Agent) bool {
 	return a.Model != "" && !(a.Provider == "anthropic" && a.APIKey == "")
 }
 
+// escalateTarget returns the cheapest still-untried, usable executor strictly
+// pricier than curr — the next rung up the cheap-first escalation ladder, or ""
+// when nothing higher is available.
+func escalateTarget(order []string, score map[string]float64, usable map[string]bool, curr string, tried map[string]bool) string {
+	cs := score[curr]
+	best, found := "", false
+	for _, name := range order {
+		if tried[name] || !usable[name] || score[name] <= cs {
+			continue
+		}
+		if !found || score[name] < score[best] {
+			best, found = name, true
+		}
+	}
+	return best
+}
+
 // rescueAgent builds a config-only helper from the first usable executor.
 func rescueAgent(cfg config.Config, onEvent core.EventFunc) *agent.Agent {
 	for _, e := range cfg.Executors {
@@ -301,6 +320,52 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 	defaultExec := order[0]
 	isolated := isolate && worktree.IsRepo(workdir)
 
+	// Cheap-first escalation: order executors by cost so a failed subtask can be
+	// retried on a more capable (pricier) executor before giving up.
+	scoreByName := map[string]float64{}
+	usableExec := map[string]bool{}
+	for _, e := range cfg.Executors {
+		scoreByName[e.Name] = pricing.Score(e)
+		usableExec[e.Name] = usable(e)
+	}
+	escalate := !cfg.DisableEscalate
+	const maxEscalations = 2
+	nextTier := func(curr string, tried map[string]bool) string {
+		return escalateTarget(order, scoreByName, usableExec, curr, tried)
+	}
+	// runJob runs the subtask on startExec, escalating up the cost ladder on a
+	// non-"completed" status. Returns the final result, the executor that produced
+	// it, and the attempt trail ("qwen:looping → deepseek:completed").
+	runJob := func(ctx context.Context, wd, subtask, startExec string, id int) (agent.RunResult, execRuntime, []string) {
+		curr := startExec
+		tried := map[string]bool{}
+		var r agent.RunResult
+		var rt execRuntime
+		var trail []string
+		var totIn, totOut, totTurns int
+		for hops := 0; ; hops++ {
+			rt = runtimes[curr]
+			tried[curr] = true
+			r = rt.runSupervised(ctx, wd, subtask, fmt.Sprintf("%s#%d", rt.name, id))
+			totIn += r.InputTokens
+			totOut += r.OutputTokens
+			totTurns += r.Turns
+			trail = append(trail, rt.name+":"+r.Status)
+			if r.Status == "completed" || !escalate || hops >= maxEscalations || ctx.Err() != nil {
+				break
+			}
+			next := nextTier(curr, tried)
+			if next == "" {
+				break // no pricier executor to escalate to
+			}
+			onEvent(core.Event{Agent: "cheep", Type: "status",
+				Status: fmt.Sprintf("escalating %s → %s after %s", rt.name, next, r.Status)})
+			curr = next
+		}
+		r.InputTokens, r.OutputTokens, r.Turns = totIn, totOut, totTurns
+		return r, rt, trail
+	}
+
 	delegate := func(ctx context.Context, args map[string]any) string {
 		rawTasks, _ := args["tasks"].([]any)
 		if len(rawTasks) == 0 {
@@ -329,29 +394,28 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 			wg.Add(1)
 			go func(i int, j job) {
 				defer wg.Done()
-				rt := runtimes[j.executor]
+				start := runtimes[j.executor]
 
 				gitMu.Lock()
 				counter++
 				id := counter
 				gitMu.Unlock()
-				label := fmt.Sprintf("%s#%d", rt.name, id)
 
 				wd := workdir
 				var tree *worktree.Tree
 				if isolated {
 					gitMu.Lock()
-					t, err := worktree.Add(workdir, rt.name, id)
+					t, err := worktree.Add(workdir, start.name, id)
 					gitMu.Unlock()
 					if err == nil {
 						tree, wd = t, t.Path
 					} else {
-						rt.onEvent(core.Event{Agent: "cheep", Type: "status",
+						start.onEvent(core.Event{Agent: "cheep", Type: "status",
 							Status: "worktree unavailable, using shared dir: " + err.Error()})
 					}
 				}
 
-				r := rt.runSupervised(ctx, wd, j.subtask, label)
+				r, rt, trail := runJob(ctx, wd, j.subtask, j.executor, id)
 				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,
@@ -360,6 +424,9 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 					"input_tokens":  r.InputTokens,
 					"output_tokens": r.OutputTokens,
 					"output":        r.Output,
+				}
+				if len(trail) > 1 {
+					res["escalation"] = strings.Join(trail, " → ")
 				}
 
 				if tree != nil {

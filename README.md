@@ -98,6 +98,13 @@ saved inline during `cheep config`.
 how much you saved by not running everything on a premium model. Prices come from a built-in
 table; tune any agent with `"price_in"` / `"price_out"` (USD per 1M tokens) in `config.json`.
 
+**Cheap-first escalation** — when a delegated subtask ends in a non-`completed` status
+(loops, times out, runs out of context, or errors), cheep automatically retries it on a more
+capable, pricier executor before giving up — so premium models are used only when the cheaper
+ones can't cope. Executors are ranked by estimated cost (local first); each result includes an
+`"escalation"` trail (e.g. `qwen:looping → deepseek:completed`) when it happened. Turn it off
+with `"disable_escalate": true` in `config.json`.
+
 **Check connectivity** at any time:
 
 ```sh

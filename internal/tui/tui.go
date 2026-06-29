@@ -30,6 +30,7 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/orchestrator"
+	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/provider"
 )
 
@@ -1123,39 +1124,12 @@ func statusKey(s string) string {
 }
 
 func (m model) isLocal(model string) bool {
-	check := func(a config.Agent) bool {
-		return a.Model == model && a.Provider != "anthropic" &&
-			(strings.Contains(a.Endpoint, "localhost") ||
-				strings.Contains(a.Endpoint, "127.0.0.1") ||
-				strings.Contains(a.Endpoint, "0.0.0.0"))
-	}
-	if check(m.cfg.Orchestrator) {
-		return true
-	}
-	for _, e := range m.cfg.Executors {
-		if check(e) {
+	for _, a := range append([]config.Agent{m.cfg.Orchestrator}, m.cfg.Executors...) {
+		if a.Model == model && pricing.IsLocal(a.Provider, a.Endpoint) {
 			return true
 		}
 	}
 	return false
-}
-
-// priceTable maps a model-name substring to (input, output) USD per 1M tokens.
-// These are estimates and drift over time — override per agent with
-// price_in / price_out in config. Local models are always treated as free.
-var priceTable = []struct {
-	key     string
-	in, out float64
-}{
-	{"claude-opus", 15, 75},
-	{"claude-sonnet", 3, 15},
-	{"claude-haiku", 0.80, 4},
-	{"gpt-4o-mini", 0.15, 0.60},
-	{"gpt-4o", 2.50, 10},
-	{"o4-mini", 1.10, 4.40},
-	{"deepseek", 0.28, 1.10},
-	{"grok", 2, 10},
-	{"mistral", 2, 6},
 }
 
 // rate returns the per-1M-token input/output price for a model and a kind:
@@ -1169,17 +1143,14 @@ func (m model) rate(modelName string) (inR, outR float64, kind string) {
 			return a.PriceIn, a.PriceOut, "priced"
 		}
 	}
-	low := strings.ToLower(modelName)
-	for _, p := range priceTable {
-		if strings.Contains(low, p.key) {
-			return p.in, p.out, "priced"
-		}
+	if i, o, ok := pricing.Rate(modelName); ok {
+		return i, o, "priced"
 	}
 	return 0, 0, "unknown"
 }
 
 func cost(in, out int, inR, outR float64) float64 {
-	return float64(in)*inR/1e6 + float64(out)*outR/1e6
+	return pricing.Cost(in, out, inR, outR)
 }
 
 // referenceRate is the cloud price used to value local/free tokens for the
