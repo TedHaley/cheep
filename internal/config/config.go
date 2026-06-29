@@ -33,6 +33,11 @@ type Agent struct {
 	// Executor supervision.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"` // wall-clock abort per run
 	MaxResumes     int `json:"max_resumes,omitempty"`     // resume-with-summary attempts
+
+	// Optional cost overrides for the spend estimate, in USD per 1M tokens.
+	// When unset, cheep uses a built-in table (and treats local models as free).
+	PriceIn  float64 `json:"price_in,omitempty"`
+	PriceOut float64 `json:"price_out,omitempty"`
 }
 
 type Config struct {

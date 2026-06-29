@@ -1,14 +1,17 @@
 # CHEEP!
 
-> A smart orchestrator plans and verifies. Cheap executors do the work — mix cloud and local, or run entirely local for almost nothing.
+> The most results per dollar of compute. A smart orchestrator plans and verifies; cheap or local executors do the work — and you watch every token and dollar.
 
-**cheep** is a tiny, single-binary, interactive multi-agent coding shell. A lead
+**cheep** is a tiny, single-binary, interactive multi-agent coding shell built around one
+idea: **get the best (or nearly the best) results for the least money.** A lead
 **orchestrator** agent breaks a task into pieces, hands each to one or more **executor**
 agents (in parallel), verifies the work, and recovers any executor that gets stuck — loops,
 runs out of context, or errors out. Every role can point at an Anthropic or any
-OpenAI-compatible endpoint, so you can mix an expensive planner with free local workers — or
-run entirely local. cheep always runs **both** roles (an orchestrator + at least one
-executor); the same model can fill both if that's all you have.
+OpenAI-compatible endpoint, so you spend premium tokens only where judgment matters and run
+the rest on cheap or local models — with a live **token-and-dollar meter** showing what each
+task actually cost and what you saved. It's one static binary with zero runtime dependencies.
+cheep always runs **both** roles (an orchestrator + at least one executor); the same model
+can fill both if that's all you have.
 
 Website & docs: **https://tedhaley.ca/cheep/**
 
@@ -91,6 +94,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 Anything exported in your shell takes precedence over `keys.env`. Executor keys can also be
 saved inline during `cheep config`.
 
+**Cost estimates** — `/tokens` shows estimated spend per model (local models are free) and
+how much you saved by not running everything on a premium model. Prices come from a built-in
+table; tune any agent with `"price_in"` / `"price_out"` (USD per 1M tokens) in `config.json`.
+
 **Check connectivity** at any time:
 
 ```sh
@@ -119,7 +126,7 @@ cheep check               # pings the orchestrator and every executor
 ### Slash commands (in the shell)
 
 `/config` (discovery configurator) · `/setup` (configure by chatting) · `/history` (browse
-and resume past conversations) · `/tokens` (usage per model, with local savings) · `/status`
+and resume past conversations) · `/tokens` (tokens **and estimated $** per model, with local savings) · `/status`
 (current setup) · `/keeptabs` (toggle auto-closing finished executor tabs) · `/close` or
 `Ctrl+W` (close the focused executor tab) · `/clear` · `/help` · `/exit`.
 

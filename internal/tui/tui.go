@@ -1140,7 +1140,77 @@ func (m model) isLocal(model string) bool {
 	return false
 }
 
-// tokenSummary is the compact persistent counter (e.g. "Σ orch 13k · exec 81k").
+// priceTable maps a model-name substring to (input, output) USD per 1M tokens.
+// These are estimates and drift over time — override per agent with
+// price_in / price_out in config. Local models are always treated as free.
+var priceTable = []struct {
+	key     string
+	in, out float64
+}{
+	{"claude-opus", 15, 75},
+	{"claude-sonnet", 3, 15},
+	{"claude-haiku", 0.80, 4},
+	{"gpt-4o-mini", 0.15, 0.60},
+	{"gpt-4o", 2.50, 10},
+	{"o4-mini", 1.10, 4.40},
+	{"deepseek", 0.28, 1.10},
+	{"grok", 2, 10},
+	{"mistral", 2, 6},
+}
+
+// rate returns the per-1M-token input/output price for a model and a kind:
+// "local" (free), "priced" (known/overridden), or "unknown" (cloud, unpriced).
+func (m model) rate(modelName string) (inR, outR float64, kind string) {
+	if m.isLocal(modelName) {
+		return 0, 0, "local"
+	}
+	for _, a := range append([]config.Agent{m.cfg.Orchestrator}, m.cfg.Executors...) {
+		if a.Model == modelName && (a.PriceIn > 0 || a.PriceOut > 0) {
+			return a.PriceIn, a.PriceOut, "priced"
+		}
+	}
+	low := strings.ToLower(modelName)
+	for _, p := range priceTable {
+		if strings.Contains(low, p.key) {
+			return p.in, p.out, "priced"
+		}
+	}
+	return 0, 0, "unknown"
+}
+
+func cost(in, out int, inR, outR float64) float64 {
+	return float64(in)*inR/1e6 + float64(out)*outR/1e6
+}
+
+// referenceRate is the cloud price used to value local/free tokens for the
+// savings estimate: the orchestrator's rate if it's cloud, else Claude Sonnet.
+func (m model) referenceRate() (inR, outR float64, label string) {
+	if i, o, k := m.rate(m.cfg.Orchestrator.Model); k == "priced" {
+		return i, o, m.cfg.Orchestrator.Model
+	}
+	return 3, 15, "claude-sonnet"
+}
+
+func usd(v float64) string {
+	if v > 0 && v < 0.01 {
+		return "<$0.01"
+	}
+	return fmt.Sprintf("$%.2f", v)
+}
+
+// spent totals the estimated USD cost of priced (cloud) usage this session.
+func (m model) spent() float64 {
+	var total float64
+	for _, model := range m.usageOrder {
+		if inR, outR, k := m.rate(model); k == "priced" {
+			u := m.usage[model]
+			total += cost(u[0], u[1], inR, outR)
+		}
+	}
+	return total
+}
+
+// tokenSummary is the compact persistent counter (e.g. "Σ orch 13k · exec 81k · $0.07").
 func (m model) tokenSummary() string {
 	o := m.usageRole["orchestrator"]
 	e := m.usageRole["executor"]
@@ -1155,7 +1225,11 @@ func (m model) tokenSummary() string {
 	if et > 0 {
 		parts = append(parts, "exec "+human(et))
 	}
-	return "Σ " + strings.Join(parts, " · ")
+	s := "Σ " + strings.Join(parts, " · ")
+	if spent := m.spent(); spent > 0 {
+		s += " · " + usd(spent)
+	}
+	return s
 }
 
 func human(n int) string {
@@ -1179,19 +1253,34 @@ func (m model) tokenLines() []string {
 		out = append(out, fmt.Sprintf("  %-13s in %s · out %s", role, human(u[0]), human(u[1])))
 	}
 	out = append(out, "")
-	local := 0
+	var spent, freeTokens, savings float64
+	refIn, refOut, refLabel := m.referenceRate()
 	for _, model := range m.usageOrder {
 		u := m.usage[model]
-		tag := "cloud"
-		if m.isLocal(model) {
-			tag = "local · free"
-			local += u[0] + u[1]
+		inR, outR, kind := m.rate(model)
+		var note string
+		switch kind {
+		case "local":
+			note = todoDoneSt.Render("free · local")
+			freeTokens += float64(u[0] + u[1])
+			savings += cost(u[0], u[1], refIn, refOut)
+		case "priced":
+			c := cost(u[0], u[1], inR, outR)
+			spent += c
+			note = "~" + usd(c)
+		default:
+			note = hintSt.Render("cloud · unpriced")
 		}
-		out = append(out, fmt.Sprintf("  %-30s in %s · out %s  (%s)", model, human(u[0]), human(u[1]), tag))
+		out = append(out, fmt.Sprintf("  %-30s in %s · out %s  %s", model, human(u[0]), human(u[1]), note))
 	}
-	if local > 0 {
-		out = append(out, todoDoneSt.Render(fmt.Sprintf("  %s tokens ran on local models at no API cost", human(local))))
+	out = append(out, "")
+	out = append(out, lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("≈ %s spent this session", usd(spent))))
+	if freeTokens > 0 {
+		out = append(out, todoDoneSt.Render(fmt.Sprintf(
+			"   %s tokens ran free on local models — ≈ %s saved at %s rates",
+			human(int(freeTokens)), usd(savings), refLabel)))
 	}
+	out = append(out, hintSt.Render("   estimates only — set price_in/price_out per agent to tune"))
 	return out
 }
 

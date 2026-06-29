@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CHEEP! — a multi-agent coding shell you can watch</title>
-<meta name="description" content="cheep is a single-binary terminal app where a smart orchestrator agent plans, delegates and verifies, and cheap local (or cloud) executor agents do the work — all visible in a tab per agent.">
+<meta name="description" content="cheep squeezes the most out of your AI budget: a smart orchestrator plans and verifies while cheap or local executor agents do the work — with a live token-and-dollar cost dashboard. One static binary, no dependencies.">
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
@@ -83,7 +83,7 @@
 ██║     ██╔══██║██╔══╝  ██╔══╝  ██╔═══╝ ╚═╝
 ╚██████╗██║  ██║███████╗███████╗██║     ██╗
  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚═╝</pre>
-    <div class="tag">A smart orchestrator plans and verifies. Cheap executors do the work.<br>Mix cloud and local — or run entirely local for almost nothing.</div>
+    <div class="tag">The most results per dollar of compute. A smart orchestrator plans and verifies; cheap or local executors do the work — and you watch every token and dollar.</div>
     <div class="badges">
       <a href="https://github.com/TedHaley/cheep">GitHub</a>
       <a href="#install">Install</a>
@@ -98,6 +98,9 @@
     or more <em>executor</em> agents (in parallel), verifies the work, and recovers any executor
     that gets stuck — loops, runs out of context, or errors out. You watch it happen, with a tab
     per agent.</p>
+    <p>The whole point: <strong>the best results for the least money.</strong> Spend premium
+    tokens only where judgment matters, run the rest on cheap or local models, and watch the
+    token-and-dollar meter so you always know what a task actually cost.</p>
     <div class="grid">
       <div class="card smart">
         <div class="who">Orchestrator</div>
@@ -120,7 +123,7 @@
     <h2>Why cheep?</h2>
     <ul class="feat">
       <li><b>Watch every agent.</b> A tab per agent with live output; see what's delegated to whom and step in any time.</li>
-      <li><b>See the savings.</b> A running token counter splits usage by orchestrator vs executors and marks local tokens as free.</li>
+      <li><b>See every dollar.</b> A live counter shows tokens and estimated cost per agent, marks local work free, and tallies what you saved versus running it all on a premium model.</li>
       <li><b>Modes.</b> <code>shift+tab</code> cycles chat → plan (read-only) → auto (full multi-agent delegation).</li>
       <li><b>Self-healing.</b> Executors that loop, exhaust their context, or error are detected and recovered automatically.</li>
       <li><b>Resumable history.</b> Conversations are saved as transcripts; resume any past session with <code>/history</code>.</li>
