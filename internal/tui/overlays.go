@@ -81,6 +81,9 @@ func (m model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.overlay = "" // any key closes
 		return m, nil
 	}
+	if m.overlay == "setupwiz" {
+		return m.updateWiz(msg)
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -119,6 +122,9 @@ func (m model) viewOverlay() string {
 	if m.overlay == "help" {
 		return m.viewHelp()
 	}
+	if m.overlay == "setupwiz" {
+		return m.viewWiz()
+	}
 	title := lipgloss.NewStyle().Bold(true).Render(m.ovTitle)
 	m.ovInput.Prompt = "setup › "
 	hint := hintSt.Render("Enter: send · Esc or /done: finish · pgup/pgdn: scroll")
@@ -141,7 +147,8 @@ func (m model) viewHelp() string {
 		"cancel:  esc cancels a running task",
 		"",
 		"commands:",
-		"  /setup /config   configure agents in-app",
+		"  /config          set up agents from discovered servers + keys",
+		"  /setup           configure by chatting with a working agent",
 		"  /status          show current setup",
 		"  /tokens          token usage per model (and local savings)",
 		"  /clear           reset the conversation",

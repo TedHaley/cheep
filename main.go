@@ -125,16 +125,32 @@ func startMCP(cfg config.Config) (mcp.Tools, *mcp.Session) {
 }
 
 func cmdChat() {
-	cfg := ensureConfig()
 	workdir, _ := os.Getwd()
-	mt, mcpSess := startMCP(cfg)
-	defer mcpSess.Close()
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		if err := tui.Run(cfg, workdir, version, mt.Orchestrator, mt.Executor); err != nil {
+	tty := term.IsTerminal(int(os.Stdin.Fd()))
+
+	// On a TTY with no config, launch the TUI straight into its discovery
+	// configurator instead of the line-based wizard.
+	if tty {
+		firstRun := !config.Exists()
+		var cfg config.Config
+		if !firstRun {
+			c, err := config.Load()
+			if err != nil {
+				fatal(fmt.Errorf("reading config: %w", err))
+			}
+			cfg = c
+		}
+		mt, mcpSess := startMCP(cfg)
+		defer mcpSess.Close()
+		if err := tui.Run(cfg, workdir, version, mt.Orchestrator, mt.Executor, firstRun); err != nil {
 			fatal(err)
 		}
 		return
 	}
+
+	cfg := ensureConfig() // no TTY: fall back to the line wizard + REPL
+	mt, mcpSess := startMCP(cfg)
+	defer mcpSess.Close()
 	lineREPL(cfg, workdir, mt.Orchestrator, mt.Executor)
 }
 

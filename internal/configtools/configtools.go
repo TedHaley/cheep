@@ -169,6 +169,30 @@ func scanServers() []serverHit {
 	return hits
 }
 
+// ServerInfo / Found are the exported shapes returned by Discover for the UI.
+type ServerInfo struct {
+	Endpoint string
+	Models   []string
+}
+
+type Found struct {
+	Name, Source, Preview, Provider, Endpoint, Value string
+}
+
+// Discover returns reachable local servers and API keys (with raw values) for
+// the setup UI to act on.
+func Discover() ([]ServerInfo, []Found) {
+	var servers []ServerInfo
+	for _, s := range scanServers() {
+		servers = append(servers, ServerInfo{Endpoint: s.Endpoint, Models: s.Models})
+	}
+	var keys []Found
+	for _, k := range scanKeys() {
+		keys = append(keys, Found{Name: k.Name, Source: k.FoundIn, Preview: k.Preview, Provider: k.Provider, Endpoint: k.Endpoint, Value: k.value})
+	}
+	return servers, keys
+}
+
 // Tools returns the configuration + discovery tools.
 func Tools() []core.Tool {
 	obj := func(props map[string]any, req ...string) map[string]any {

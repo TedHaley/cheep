@@ -97,7 +97,7 @@ type model struct {
 	usageOrder []string          // models in first-seen order
 	usageRole  map[string][2]int // "orchestrator"/"executor" -> {input, output}
 
-	// overlay: "" (none) | "help" | "setup"
+	// overlay: "" (none) | "help" | "setup" | "setupwiz"
 	overlay string
 	ovTitle string
 	ovInput textinput.Model
@@ -106,6 +106,8 @@ type model struct {
 	ovState *configassist.State
 	ovLog   []string
 	ovBusy  bool
+
+	wiz wizState // discovery configurator (/config and first launch)
 }
 
 var (
@@ -228,11 +230,12 @@ func countOpenItems(todos []todoItem) int {
 // Version is shown in the header; set by main before Run.
 var Version = "dev"
 
-// Run starts the full-screen shell.
-func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core.Tool) error {
+// Run starts the full-screen shell. firstRun opens the setup configurator
+// immediately (no config yet).
+func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core.Tool, firstRun bool) error {
 	Version = version
 	events := make(chan core.Event, 1024)
-	m := newModel(cfg, workdir, events, extraOrch, extraExec)
+	m := newModel(cfg, workdir, events, extraOrch, extraExec, firstRun)
 	// Mouse on for wheel/trackpad scrolling. (To select/copy text, hold Option on
 	// macOS or Shift elsewhere to bypass mouse tracking.)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
@@ -245,7 +248,7 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	return err
 }
 
-func newModel(cfg config.Config, workdir string, events chan core.Event, extraOrch, extraExec []core.Tool) model {
+func newModel(cfg config.Config, workdir string, events chan core.Event, extraOrch, extraExec []core.Tool, firstRun bool) model {
 	ta := textarea.New()
 	ta.Placeholder = "type a task, or /help"
 	ta.Prompt = "› "
@@ -282,12 +285,16 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		sp:     sp,
 		vp:     viewport.New(80, 20),
 	}
-	m.welcomeLen = len(m.tabs[0].lines)
 	(&m).rebuild(false)
-	if m.buildErr != nil {
+	if firstRun {
+		// No config yet — open the discovery configurator over the banner.
+		m.overlay = "setupwiz"
+		m.wiz = newWizState()
+	} else if m.buildErr != nil {
 		m.tabs[0].lines = append(m.tabs[0].lines,
 			errSt.Render("✗ ")+errText(m.buildErr)+hintSt.Render("  ·  fix with /config or /setup"))
 	}
+	m.welcomeLen = len(m.tabs[0].lines)
 	return m
 }
 
@@ -388,7 +395,13 @@ func (m *model) rebuild(keep bool) {
 	m.session = orch.Resume(hist)
 }
 
-func (m model) Init() tea.Cmd { return tea.Batch(textarea.Blink, probeCmd(m.cfg)) }
+func (m model) Init() tea.Cmd {
+	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg)}
+	if m.overlay == "setupwiz" { // first launch — start discovery
+		cmds = append(cmds, wizDiscoverCmd())
+	}
+	return tea.Batch(cmds...)
+}
 
 type probeMsg map[string]string
 
@@ -505,6 +518,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ovDoneMsg:
 		m.ovBusy = false
+		return m, nil
+
+	case wizMsg:
+		m.wiz.loading = false
+		m.wiz.cands = msg.cands
+		m.wiz.extra = msg.extra
 		return m, nil
 
 	case probeMsg:
@@ -727,7 +746,9 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.follow = true
 		(&m).syncViewport()
-	case "/setup", "/config":
+	case "/config":
+		return m.openWizard()
+	case "/setup":
 		return m.openSetup()
 	case "/help", "/?":
 		m.overlay = "help"

@@ -1,0 +1,345 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/TedHaley/cheep/internal/config"
+	"github.com/TedHaley/cheep/internal/configtools"
+	"github.com/TedHaley/cheep/internal/provider"
+)
+
+// The setup wizard ("setupwiz" overlay) is a keyboard-driven configurator. It
+// runs discovery (local servers + API keys), lets the user pick an orchestrator
+// and tag executors, and — when nothing discovered fits — offers a manual form.
+// It opens automatically on first launch and via /config.
+
+type wizCandidate struct {
+	provider, endpoint, model, key, src string
+	local                               bool
+}
+
+func (c wizCandidate) where() string {
+	switch {
+	case c.provider == "anthropic":
+		return "Anthropic · " + c.src
+	case c.local:
+		return c.endpoint + " · local"
+	case c.src != "":
+		return c.endpoint + " · " + c.src
+	}
+	return c.endpoint
+}
+
+type wizState struct {
+	mode    string // "pick" | "manual"
+	loading bool
+	cands   []wizCandidate
+	extra   []string // key names found but not directly usable
+	cursor  int
+	orch    int // index into cands, -1 = none chosen
+	execs   map[int]bool
+
+	fields []textinput.Model // manual form: provider, endpoint, model, api key
+	focus  int
+	err    string
+}
+
+func newWizState() wizState {
+	return wizState{mode: "pick", loading: true, orch: -1, execs: map[int]bool{}}
+}
+
+type wizMsg struct {
+	cands []wizCandidate
+	extra []string
+}
+
+// openWizard opens the discovery configurator and starts the scan.
+func (m model) openWizard() (tea.Model, tea.Cmd) {
+	m.overlay = "setupwiz"
+	m.wiz = newWizState()
+	return m, wizDiscoverCmd()
+}
+
+// wizDiscoverCmd scans for local servers and API keys, and (for cloud keys)
+// lists their models, off the UI goroutine.
+func wizDiscoverCmd() tea.Cmd {
+	return func() tea.Msg {
+		servers, keys := configtools.Discover()
+		var cands []wizCandidate
+		for _, srv := range servers {
+			for _, mdl := range srv.Models {
+				cands = append(cands, wizCandidate{provider: "openai", endpoint: srv.Endpoint, model: mdl, local: true})
+			}
+		}
+		var extra []string
+		for _, k := range keys {
+			switch {
+			case k.Provider == "anthropic":
+				cands = append(cands, wizCandidate{provider: "anthropic", model: "claude-sonnet-4-6", key: k.Value, src: k.Name})
+			case k.Provider == "openai" && k.Endpoint != "":
+				base, models, err := provider.DiscoverModels(k.Endpoint, k.Value)
+				if err != nil || len(models) == 0 {
+					extra = append(extra, k.Name)
+					continue
+				}
+				if len(models) > 8 { // keep the picker readable
+					models = models[:8]
+				}
+				for _, mdl := range models {
+					cands = append(cands, wizCandidate{provider: "openai", endpoint: base, model: mdl, key: k.Value, src: k.Name})
+				}
+			default:
+				extra = append(extra, k.Name)
+			}
+		}
+		return wizMsg{cands: cands, extra: extra}
+	}
+}
+
+func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.wiz.mode == "manual" {
+		return m.updateWizManual(msg)
+	}
+	w := &m.wiz
+	if w.loading {
+		if s := msg.String(); s == "esc" || s == "ctrl+c" {
+			return m.closeWizard()
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		return m.closeWizard()
+	case "up", "k":
+		if w.cursor > 0 {
+			w.cursor--
+		}
+	case "down", "j":
+		if w.cursor < len(w.cands)-1 {
+			w.cursor++
+		}
+	case "o":
+		if len(w.cands) > 0 {
+			w.orch = w.cursor
+			w.err = ""
+		}
+	case "e", " ":
+		if len(w.cands) > 0 {
+			if w.execs[w.cursor] {
+				delete(w.execs, w.cursor)
+			} else {
+				w.execs[w.cursor] = true
+			}
+		}
+	case "m":
+		return m.enterManual()
+	case "enter":
+		return m.saveWizard()
+	}
+	return m, nil
+}
+
+func (m model) enterManual() (tea.Model, tea.Cmd) {
+	mk := func(placeholder, val string) textinput.Model {
+		ti := textinput.New()
+		ti.Placeholder = placeholder
+		ti.SetValue(val)
+		ti.Width = max(20, m.w-26)
+		return ti
+	}
+	w := &m.wiz
+	w.mode = "manual"
+	w.err = ""
+	w.focus = 0
+	w.fields = []textinput.Model{
+		mk("anthropic | openai", "openai"),
+		mk("http://…  (leave blank for Anthropic)", ""),
+		mk("model id, e.g. claude-sonnet-4-6 or qwen/…", ""),
+		mk("API key (optional; blank uses your env)", ""),
+	}
+	w.fields[3].EchoMode = textinput.EchoPassword
+	w.fields[0].Focus()
+	return m, textinput.Blink
+}
+
+func (m model) updateWizManual(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		w.mode, w.err = "pick", ""
+		return m, nil
+	case "enter":
+		return m.saveManual()
+	case "tab", "down":
+		w.focus = (w.focus + 1) % len(w.fields)
+	case "shift+tab", "up":
+		w.focus = (w.focus - 1 + len(w.fields)) % len(w.fields)
+	default:
+		var cmd tea.Cmd
+		w.fields[w.focus], cmd = w.fields[w.focus].Update(msg)
+		return m, cmd
+	}
+	for i := range w.fields {
+		if i == w.focus {
+			w.fields[i].Focus()
+		} else {
+			w.fields[i].Blur()
+		}
+	}
+	return m, nil
+}
+
+func (m model) saveManual() (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	prov := strings.ToLower(strings.TrimSpace(w.fields[0].Value()))
+	endpoint := strings.TrimSpace(w.fields[1].Value())
+	mdl := strings.TrimSpace(w.fields[2].Value())
+	key := strings.TrimSpace(w.fields[3].Value())
+	switch {
+	case prov != "anthropic" && prov != "openai":
+		w.err = `provider must be "anthropic" or "openai"`
+		return m, nil
+	case mdl == "":
+		w.err = "a model id is required"
+		return m, nil
+	case prov == "openai" && endpoint == "":
+		w.err = "an endpoint is required for openai-compatible providers"
+		return m, nil
+	}
+	cfg := config.Config{Orchestrator: config.Agent{Provider: prov, Endpoint: endpoint, Model: mdl, APIKey: key}}
+	return m.applyWizConfig(cfg, "manual setup saved")
+}
+
+func (m model) saveWizard() (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	if w.orch < 0 || w.orch >= len(w.cands) {
+		w.err = "pick an orchestrator first (move with ↑/↓, press o)"
+		return m, nil
+	}
+	oc := w.cands[w.orch]
+	cfg := config.Config{Orchestrator: config.Agent{Provider: oc.provider, Endpoint: oc.endpoint, Model: oc.model, APIKey: oc.key}}
+	n := 1
+	for i := range w.cands {
+		if i == w.orch || !w.execs[i] {
+			continue
+		}
+		e := w.cands[i]
+		cfg.Executors = append(cfg.Executors, config.Agent{
+			Name: fmt.Sprintf("executor-%d", n), Provider: e.provider,
+			Endpoint: e.endpoint, Model: e.model, APIKey: e.key,
+		})
+		n++
+	}
+	return m.applyWizConfig(cfg, "configured from discovered services")
+}
+
+// applyWizConfig persists the new config, rebuilds the session, and refreshes the
+// banner — shared by the discovered-pick and manual paths.
+func (m model) applyWizConfig(cfg config.Config, okMsg string) (tea.Model, tea.Cmd) {
+	if err := config.Save(cfg); err != nil {
+		m.wiz.err = "save failed: " + err.Error()
+		return m, nil
+	}
+	if c, err := config.Load(); err == nil {
+		m.cfg = c
+	}
+	m.keepTabs = m.cfg.KeepTabs
+	m.overlay = ""
+	(&m).rebuild(true)
+
+	banner := welcomeLines(m.cfg, nil)
+	if len(m.tabs[0].lines) == m.welcomeLen { // banner untouched — replace it
+		m.tabs[0].lines = banner
+	} else { // mid-session — append a fresh banner
+		m.tabs[0].lines = append(append(m.tabs[0].lines, ""), banner...)
+	}
+	m.welcomeLen = len(m.tabs[0].lines)
+	if m.buildErr != nil {
+		m.tabs[0].lines = append(m.tabs[0].lines,
+			errSt.Render("✗ ")+errText(m.buildErr)+hintSt.Render("  ·  fix with /config"))
+	}
+	m.footer = okMsg + " · orchestrator " + m.cfg.Orchestrator.Model
+	m.active, m.follow = 0, true
+	(&m).syncViewport()
+	return m, probeCmd(m.cfg)
+}
+
+func (m model) closeWizard() (tea.Model, tea.Cmd) {
+	m.overlay = ""
+	if m.session == nil {
+		m.footer = "setup cancelled — run /config to set up cheep"
+	}
+	(&m).syncViewport()
+	return m, nil
+}
+
+func (m model) viewWiz() string {
+	title := lipgloss.NewStyle().Bold(true).Render("Set up cheep")
+	if m.wiz.mode == "manual" {
+		return m.viewWizManual(title)
+	}
+	w := m.wiz
+	if w.loading {
+		body := title + "\n\n  scanning for local servers and API keys…"
+		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, ovBox.Padding(1, 3).Render(body))
+	}
+	lines := []string{title, hintSt.Render("Pick an orchestrator; optionally tag executors to delegate to."), ""}
+	if len(w.cands) == 0 {
+		lines = append(lines, "  No local servers or usable API keys were found.",
+			hintSt.Render("  Start a local model (Ollama, LM Studio, …) or add an API key — or enter one manually."), "")
+	} else {
+		for i, c := range w.cands {
+			cur := "  "
+			if i == w.cursor {
+				cur = todoProgSt.Render("▸ ")
+			}
+			tags := ""
+			if i == w.orch {
+				tags += " " + okSt.Render("[orchestrator]")
+			}
+			if w.execs[i] {
+				tags += " " + todoProgSt.Render("[executor]")
+			}
+			lines = append(lines, cur+c.model+hintSt.Render("  "+c.where())+tags)
+		}
+	}
+	if len(w.extra) > 0 {
+		lines = append(lines, "", hintSt.Render("keys found (models unlisted): "+strings.Join(w.extra, ", ")))
+	}
+	if w.err != "" {
+		lines = append(lines, "", errSt.Render("✗ "+w.err))
+	}
+	lines = append(lines, "",
+		hintSt.Render("↑/↓ move · o orchestrator · e executor · enter save · m manual · esc cancel"))
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
+		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+}
+
+func (m model) viewWizManual(title string) string {
+	w := m.wiz
+	labels := []string{"provider", "endpoint", "model", "api key"}
+	lines := []string{title + hintSt.Render("  ·  manual orchestrator"), ""}
+	for i, f := range w.fields {
+		marker := "  "
+		if i == w.focus {
+			marker = todoProgSt.Render("▸ ")
+		}
+		lines = append(lines, marker+fmt.Sprintf("%-9s ", labels[i])+f.View())
+	}
+	if w.err != "" {
+		lines = append(lines, "", errSt.Render("✗ "+w.err))
+	}
+	lines = append(lines, "",
+		hintSt.Render("tab / ↑↓ move · enter save · esc back to discovered list"))
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
+		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+}
