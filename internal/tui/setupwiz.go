@@ -51,10 +51,11 @@ type wizState struct {
 	orch    int // index into cands, -1 = none chosen
 	execs   map[int]bool
 
-	fields     []textinput.Model // manual form inputs
-	focus      int
-	manualProv int // selected provider in the manual provider list
-	err        string
+	fields      []textinput.Model // manual form inputs
+	focus       int
+	manualProv  int  // selected provider in the manual provider list
+	confirmSolo bool // user pressed enter with no executors; confirm solo on the next
+	err         string
 
 	keyInput textinput.Model // "key" mode: paste an Anthropic key for a keyless pick
 	pending  config.Config   // config awaiting the pasted key
@@ -73,6 +74,18 @@ var manualProviders = []manualProvider{
 	{"OpenRouter", "openai", "https://openrouter.ai/api/v1"},
 	{"Mistral", "openai", "https://api.mistral.ai/v1"},
 	{"Custom (OpenAI-compatible)", "openai", ""},
+}
+
+// chatModel filters out models that can't act as an orchestrator/executor
+// (embeddings, speech, rerankers, …) so they don't clutter the picker.
+func chatModel(name string) bool {
+	n := strings.ToLower(name)
+	for _, bad := range []string{"embed", "whisper", "tts", "rerank", "moderation", "clip", "diffusion"} {
+		if strings.Contains(n, bad) {
+			return false
+		}
+	}
+	return true
 }
 
 func modelHint(p manualProvider) string {
@@ -114,6 +127,9 @@ func wizDiscoverCmd() tea.Cmd {
 		var cands []wizCandidate
 		for _, srv := range servers {
 			for _, mdl := range srv.Models {
+				if !chatModel(mdl) {
+					continue
+				}
 				cands = append(cands, wizCandidate{provider: "openai", endpoint: srv.Endpoint, model: mdl, local: true})
 			}
 		}
@@ -132,6 +148,9 @@ func wizDiscoverCmd() tea.Cmd {
 					models = models[:8]
 				}
 				for _, mdl := range models {
+					if !chatModel(mdl) {
+						continue
+					}
 					cands = append(cands, wizCandidate{provider: "openai", endpoint: base, model: mdl, key: k.Value, src: k.Name})
 				}
 			default:
@@ -174,7 +193,7 @@ func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		if len(w.cands) > 0 {
 			w.orch = w.cursor
-			w.err = ""
+			w.err, w.confirmSolo = "", false
 		}
 	case "e", " ":
 		if len(w.cands) > 0 {
@@ -183,6 +202,7 @@ func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				w.execs[w.cursor] = true
 			}
+			w.confirmSolo = false
 		}
 	case "m":
 		return m.enterManual()
@@ -312,6 +332,22 @@ func (m model) saveWizard() (tea.Model, tea.Cmd) {
 	w := &m.wiz
 	if w.orch < 0 || w.orch >= len(w.cands) {
 		w.err = "pick an orchestrator first (move with ↑/↓, press o)"
+		return m, nil
+	}
+	// Guide toward adding executors: if other models are available but none are
+	// tagged, ask the user to confirm solo before saving.
+	hasExec, availExec := false, 0
+	for i := range w.cands {
+		if i == w.orch {
+			continue
+		}
+		availExec++
+		if w.execs[i] {
+			hasExec = true
+		}
+	}
+	if !hasExec && availExec > 0 && !w.confirmSolo {
+		w.confirmSolo = true
 		return m, nil
 	}
 	oc := w.cands[w.orch]
@@ -456,6 +492,44 @@ func (m model) viewWiz() string {
 	if w.err != "" {
 		lines = append(lines, "", errSt.Render("✗ "+w.err))
 	}
+
+	// Live setup summary + step-by-step guidance.
+	orchName := "—"
+	if w.orch >= 0 && w.orch < len(w.cands) {
+		orchName = short(w.cands[w.orch].model, 28)
+	}
+	var execNames []string
+	availExec, suggest := 0, ""
+	for i := range w.cands {
+		if i == w.orch {
+			continue
+		}
+		availExec++
+		if suggest == "" {
+			suggest = short(w.cands[i].model, 22)
+		}
+		if w.execs[i] {
+			execNames = append(execNames, short(w.cands[i].model, 20))
+		}
+	}
+	execPart := "none (solo)"
+	if len(execNames) > 0 {
+		execPart = strings.Join(execNames, ", ")
+	}
+	lines = append(lines, "", hintSt.Render("setup → orchestrator ")+orchName+hintSt.Render("  ·  executors ")+execPart)
+	switch {
+	case w.orch < 0:
+		lines = append(lines, hintSt.Render("step 1 — press o to choose the orchestrator"))
+	case len(execNames) == 0 && availExec == 0:
+		lines = append(lines, hintSt.Render("only one model available — it'll run solo · enter to save"))
+	case len(execNames) == 0 && w.confirmSolo:
+		lines = append(lines, errSt.Render("no executors — press enter again to run solo, or e to add one"))
+	case len(execNames) == 0:
+		lines = append(lines, hintSt.Render("step 2 — press e to add an executor (e.g. "+suggest+"), or enter for solo"))
+	default:
+		lines = append(lines, hintSt.Render("enter to save"))
+	}
+
 	lines = append(lines, "",
 		hintSt.Render("↑/↓ move · o orchestrator · e executor · enter save · m manual · esc cancel"))
 	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
