@@ -1,13 +1,14 @@
 # cheep
 
-> A smart lead agent orchestrates. Cheap local models do the work. You pay almost nothing.
+> A smart orchestrator plans and verifies. Cheap executors do the work — mix cloud and local, or run entirely local for almost nothing.
 
 **cheep** is a tiny, single-binary, interactive multi-agent coding shell. A lead
 **orchestrator** agent breaks a task into pieces, hands each to one or more **executor**
 agents (in parallel), verifies the work, and recovers any executor that gets stuck — loops,
 runs out of context, or errors out. Every role can point at an Anthropic or any
 OpenAI-compatible endpoint, so you can mix an expensive planner with free local workers — or
-run entirely local.
+run entirely local. cheep always runs **both** roles (an orchestrator + at least one
+executor); the same model can fill both if that's all you have.
 
 Website & docs: **https://tedhaley.ca/cheep/**
 
@@ -31,17 +32,21 @@ go install github.com/TedHaley/cheep@latest
 ## Quick start
 
 ```sh
-cheep            # first run walks you through setup, then drops you in the shell
+cheep            # first run opens the setup configurator, then drops you in the shell
 ```
 
-On first launch cheep asks you to configure an **orchestrator** and, optionally, one or
-more **executors**. Then you get an interactive prompt:
+On first launch (and any time a role is missing) cheep opens a **setup configurator**: it
+scans your machine for running model servers (Ollama, LM Studio, vLLM, llama.cpp, …) and API
+keys, and you pick an **orchestrator** and at least one **executor** — or press `m` to enter
+cloud credentials manually (Anthropic, OpenAI, Grok, DeepSeek, …). With a single local model
+you can use it for both roles. Then you get an interactive prompt:
 
 ```
 › build a small CLI todo app with tests
 ```
 
-Type a task and the orchestrator plans, delegates, verifies, and reports back.
+Type a task and the orchestrator plans, delegates, verifies, and reports back. Reopen the
+configurator any time with `/config`.
 
 ## Configuration
 
@@ -50,21 +55,27 @@ cheep keeps everything in its home directory, **`~/.cheep/`** (override with `CH
 ```
 ~/.cheep/
 ├── config.json   # your agents (orchestrator + executors)
-└── keys.env      # your API keys, loaded automatically on startup
+├── keys.env      # your API keys, loaded automatically on startup
+└── history/      # saved conversations (JSON records + Markdown transcripts)
 ```
 
-**Set it up** — run the wizard any time:
+**Set it up** — two ways, both interactive:
 
-```sh
-cheep config              # interactive setup / reconfigure
-cheep config show         # print the current setup
-cheep config path         # print the config file location
-```
+- **In the shell:** `/config` opens the **discovery configurator** — it lists discovered
+  local servers (with their models) and any API keys it found; pick an orchestrator with `o`,
+  tag executors with `e`, or press `m` to enter cloud credentials manually. `/setup` instead
+  lets you configure by chatting with a working agent (see below).
+- **From the CLI:**
 
-The wizard asks for an **orchestrator** (blank endpoint = Anthropic/Claude; or paste any
-OpenAI-compatible endpoint), then optionally lets you add **executors**. For executors you
-give only an **endpoint + access key** — cheep detects the model behind it automatically.
-If you configure no executors, the orchestrator runs **solo** and does the work itself.
+  ```sh
+  cheep config              # line-based setup / reconfigure
+  cheep config show         # print the current setup
+  cheep config path         # print the config file location
+  ```
+
+cheep needs **both** an orchestrator and at least one executor — there's no solo mode. If you
+only have one model, use it for both roles (in the picker, tag the same row with `o` and `e`).
+For executors you give only an **endpoint + access key** — cheep detects the model behind it.
 
 **Keys** — store them once in `~/.cheep/keys.env` instead of exporting them:
 
@@ -88,10 +99,11 @@ cheep check               # pings the orchestrator and every executor
 
 ### Example: Claude orchestrator + local Qwen executor
 
-1. `cheep config` → leave the orchestrator endpoint blank (Claude), choose a model.
-2. Add an executor → endpoint `http://127.0.0.1:1234`, blank key → cheep detects the model.
-3. Put `ANTHROPIC_API_KEY=sk-ant-...` in `~/.cheep/keys.env`.
-4. `cheep` → start working.
+1. Start your local model (e.g. LM Studio or Ollama) on an OpenAI-compatible endpoint.
+2. `cheep` → in the configurator, press `m` → **Anthropic (Claude)** → enter a model and paste
+   your `ANTHROPIC_API_KEY`. (Or set the orchestrator to your local model for a $0 setup.)
+3. Back in the list, tag the discovered local Qwen as the executor with `e`, then save.
+4. Start working.
 
 ## Commands
 
@@ -100,10 +112,16 @@ cheep check               # pings the orchestrator and every executor
 | `cheep` | Start the interactive shell |
 | `cheep run "<task>" [--workdir DIR]` | Run a single task non-interactively |
 | `cheep check` | Ping the orchestrator and every executor |
-| `cheep config [show\|path]` | Set up or inspect your agents (manual wizard) |
-| `cheep setup` | Configure agents by chatting with a working one |
+| `cheep config [show\|path]` | Set up or inspect your agents (line-based CLI wizard) |
 | `cheep keys` | Show/create the key store |
 | `cheep version` | Print the version |
+
+### Slash commands (in the shell)
+
+`/config` (discovery configurator) · `/setup` (configure by chatting) · `/history` (browse
+and resume past conversations) · `/tokens` (usage per model, with local savings) · `/status`
+(current setup) · `/keeptabs` (toggle auto-closing finished executor tabs) · `/close` or
+`Ctrl+W` (close the focused executor tab) · `/clear` · `/help` · `/exit`.
 
 ### Modes
 
@@ -114,16 +132,23 @@ The interactive shell has three modes, switchable mid-conversation (your history
 - **auto** — full autonomy: plan, delegate to executors, edit, and verify (the default).
 
 Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵⏵ auto`,
-`⏸ plan`, `⏵ chat`). Or use `/chat` `/plan` `/auto` / `/mode`, plus `/clear`, `/status`,
-`/help`, `/exit`.
+`⏸ plan`, `⏵ chat`). Or use `/chat` `/plan` `/auto` / `/mode`.
 
 ### Agent tabs
 
 In a terminal, cheep runs as a full-screen shell with a **tab per agent**: the orchestrator
 plus one for each executor it spawns (with a live status — running `●`, done `✓`, stuck `⚠`,
 error `✗`). Press **Tab** (or `Ctrl+←/→`) to switch agents and watch each one's output;
-`PgUp/PgDn` scrolls. Executor tabs persist until `/clear`. When stdin isn't a terminal
-(pipes/CI), cheep falls back to a simple line-based mode.
+`PgUp/PgDn` (or the mouse wheel) scrolls. Finished executor tabs **auto-close at the end of a
+turn** by default — toggle with `/keeptabs`, or close the focused one with `Ctrl+W` / `/close`.
+A persistent **token counter** shows orchestrator vs executor usage and flags local tokens as
+free. When stdin isn't a terminal (pipes/CI), cheep falls back to a simple line-based mode.
+
+### Chat history
+
+Every conversation is saved to `~/.cheep/history/` — a JSON record (used to resume into the
+agent's context) plus a human-readable Markdown transcript. Press `/history` (or `/resume`)
+to browse past sessions and reopen one where you left off.
 
 ### Configure by chatting
 
