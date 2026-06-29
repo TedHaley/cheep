@@ -114,7 +114,10 @@ func scanKeys() []keyHit {
 	}
 	files := []string{}
 	if home, _ := os.UserHomeDir(); home != "" {
-		for _, f := range []string{".zshrc", ".zshenv", ".bashrc", ".bash_profile", ".profile", ".env"} {
+		for _, f := range []string{
+			".zshrc", ".zshenv", ".zprofile", ".zlogin",
+			".bashrc", ".bash_profile", ".bash_login", ".profile", ".envrc", ".env",
+		} {
 			files = append(files, filepath.Join(home, f))
 		}
 	}

@@ -296,8 +296,10 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
 	(&m).rebuild(false)
-	if firstRun {
-		// No config yet — open the discovery configurator over the banner.
+	if firstRun || !orchestratorUsable(m.cfg) {
+		// No config, or the orchestrator can't run (e.g. Claude with no key) —
+		// open the configurator over the banner. Any rescue session stays
+		// underneath as a fallback if the user escapes.
 		m.overlay = "setupwiz"
 		m.wiz = newWizState()
 	} else if m.buildErr != nil {
@@ -407,10 +409,22 @@ func (m *model) rebuild(keep bool) {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg)}
-	if m.overlay == "setupwiz" { // first launch — start discovery
-		cmds = append(cmds, wizDiscoverCmd())
+	if m.overlay == "setupwiz" { // first launch / unusable orchestrator — scan now
+		cmds = append(cmds, wizDiscoverCmd(m.cfg))
 	}
 	return tea.Batch(cmds...)
+}
+
+// orchestratorUsable reports whether the configured orchestrator can actually run.
+func orchestratorUsable(cfg config.Config) bool {
+	o := cfg.Orchestrator
+	if o.Model == "" {
+		return false
+	}
+	if o.Provider == "anthropic" && o.APIKey == "" {
+		return false
+	}
+	return true
 }
 
 type probeMsg map[string]string

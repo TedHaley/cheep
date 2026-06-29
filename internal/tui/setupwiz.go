@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -26,7 +27,13 @@ type wizCandidate struct {
 func (c wizCandidate) where() string {
 	switch {
 	case c.provider == "anthropic":
-		return "Anthropic · " + c.src
+		if c.key == "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
+			return "Anthropic · needs key (you'll paste it)"
+		}
+		if c.src != "" {
+			return "Anthropic · " + c.src
+		}
+		return "Anthropic"
 	case c.local:
 		return c.endpoint + " · local"
 	case c.src != "":
@@ -47,6 +54,9 @@ type wizState struct {
 	fields []textinput.Model // manual form: provider, endpoint, model, api key
 	focus  int
 	err    string
+
+	keyInput textinput.Model // "key" mode: paste an Anthropic key for a keyless pick
+	pending  config.Config   // config awaiting the pasted key
 }
 
 func newWizState() wizState {
@@ -62,12 +72,13 @@ type wizMsg struct {
 func (m model) openWizard() (tea.Model, tea.Cmd) {
 	m.overlay = "setupwiz"
 	m.wiz = newWizState()
-	return m, wizDiscoverCmd()
+	return m, wizDiscoverCmd(m.cfg)
 }
 
 // wizDiscoverCmd scans for local servers and API keys, and (for cloud keys)
-// lists their models, off the UI goroutine.
-func wizDiscoverCmd() tea.Cmd {
+// lists their models, off the UI goroutine. cfg seeds a Claude option so the
+// user can always choose Anthropic and paste a key.
+func wizDiscoverCmd(cfg config.Config) tea.Cmd {
 	return func() tea.Msg {
 		servers, keys := configtools.Discover()
 		var cands []wizCandidate
@@ -97,13 +108,36 @@ func wizDiscoverCmd() tea.Cmd {
 				extra = append(extra, k.Name)
 			}
 		}
+		// Always offer Claude — even with no key found — so the user can pick it
+		// and paste a key (keeping Claude instead of being pushed to a local model).
+		hasAnthropic := false
+		for _, c := range cands {
+			if c.provider == "anthropic" {
+				hasAnthropic = true
+				break
+			}
+		}
+		if !hasAnthropic {
+			model := "claude-sonnet-4-6"
+			key := ""
+			if cfg.Orchestrator.Provider == "anthropic" {
+				if cfg.Orchestrator.Model != "" {
+					model = cfg.Orchestrator.Model
+				}
+				key = cfg.Orchestrator.APIKey
+			}
+			cands = append(cands, wizCandidate{provider: "anthropic", model: model, key: key})
+		}
 		return wizMsg{cands: cands, extra: extra}
 	}
 }
 
 func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.wiz.mode == "manual" {
+	switch m.wiz.mode {
+	case "manual":
 		return m.updateWizManual(msg)
+	case "key":
+		return m.updateWizKey(msg)
 	}
 	w := &m.wiz
 	if w.loading {
@@ -239,7 +273,51 @@ func (m model) saveWizard() (tea.Model, tea.Cmd) {
 		})
 		n++
 	}
+	// Claude chosen but no key on hand — ask the user to paste it.
+	if oc.provider == "anthropic" && oc.key == "" && os.Getenv("ANTHROPIC_API_KEY") == "" {
+		return m.enterKeyMode(cfg)
+	}
 	return m.applyWizConfig(cfg, "configured from discovered services")
+}
+
+func (m model) enterKeyMode(pending config.Config) (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	w.pending = pending
+	w.mode = "key"
+	w.err = ""
+	ti := textinput.New()
+	ti.Placeholder = "sk-ant-…"
+	ti.EchoMode = textinput.EchoPassword
+	ti.Width = max(24, m.w-26)
+	ti.Focus()
+	w.keyInput = ti
+	return m, textinput.Blink
+}
+
+func (m model) updateWizKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		w.mode, w.err = "pick", ""
+		return m, nil
+	case "enter":
+		key := strings.TrimSpace(w.keyInput.Value())
+		if key == "" {
+			w.err = "paste your Anthropic API key (or esc to go back)"
+			return m, nil
+		}
+		if err := config.SetKey("ANTHROPIC_API_KEY", key); err != nil {
+			w.err = "save failed: " + err.Error()
+			return m, nil
+		}
+		w.pending.Orchestrator.APIKey = key
+		return m.applyWizConfig(w.pending, "saved your Anthropic key · keeping Claude")
+	}
+	var cmd tea.Cmd
+	w.keyInput, cmd = w.keyInput.Update(msg)
+	return m, cmd
 }
 
 // applyWizConfig persists the new config, rebuilds the session, and refreshes the
@@ -284,8 +362,11 @@ func (m model) closeWizard() (tea.Model, tea.Cmd) {
 
 func (m model) viewWiz() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Set up cheep")
-	if m.wiz.mode == "manual" {
+	switch m.wiz.mode {
+	case "manual":
 		return m.viewWizManual(title)
+	case "key":
+		return m.viewWizKey(title)
 	}
 	w := m.wiz
 	if w.loading {
@@ -320,6 +401,22 @@ func (m model) viewWiz() string {
 	}
 	lines = append(lines, "",
 		hintSt.Render("↑/↓ move · o orchestrator · e executor · enter save · m manual · esc cancel"))
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
+		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+}
+
+func (m model) viewWizKey(title string) string {
+	w := m.wiz
+	lines := []string{
+		title + hintSt.Render("  ·  Anthropic API key"), "",
+		"  " + w.pending.Orchestrator.Model + hintSt.Render("  needs an API key to run"), "",
+		"  key  " + w.keyInput.View(),
+	}
+	if w.err != "" {
+		lines = append(lines, "", errSt.Render("✗ "+w.err))
+	}
+	lines = append(lines, "",
+		hintSt.Render("enter save · esc back · stored in ~/.cheep/keys.env (0600), active immediately"))
 	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
 		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
