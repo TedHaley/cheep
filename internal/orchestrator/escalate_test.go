@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/TedHaley/cheep/internal/config"
@@ -52,5 +53,22 @@ func TestPricingScoreOrdering(t *testing.T) {
 	}
 	if s := pricing.Score(override); s != 2 {
 		t.Fatalf("override score = %v, want 2 (price_in+price_out)", s)
+	}
+}
+
+func TestRosterCostAware(t *testing.T) {
+	execs := []config.Agent{
+		{Name: "claude", Provider: "anthropic", Model: "claude-sonnet-4-6"},
+		{Name: "local", Provider: "openai", Endpoint: "http://127.0.0.1:1234/v1", Model: "qwen"},
+		{Name: "deepseek", Provider: "openai", Endpoint: "https://api.deepseek.com/v1", Model: "deepseek-chat"},
+	}
+	out := roster(execs, 5)
+	t.Logf("\n%s", out)
+	li, di, ci := strings.Index(out, `"local"`), strings.Index(out, `"deepseek"`), strings.Index(out, `"claude"`)
+	if !(li >= 0 && li < di && di < ci) {
+		t.Fatalf("not cheapest-first: local=%d deepseek=%d claude=%d", li, di, ci)
+	}
+	if !strings.Contains(out, "$5.00") {
+		t.Fatal("project budget not shown")
 	}
 }

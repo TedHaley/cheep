@@ -19,6 +19,7 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/mcp"
 	"github.com/TedHaley/cheep/internal/orchestrator"
+	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tui"
 	"github.com/TedHaley/cheep/internal/worktree"
@@ -48,7 +49,9 @@ const bannerArt = `
  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚═╝`
 
 func main() {
-	config.Init() // migrate legacy config + load ~/.cheep/keys.env into the env
+	config.Init()          // migrate legacy config + load ~/.cheep/keys.env into the env
+	pricing.Load()         // load cached per-token prices (no network)
+	pricing.MaybeRefresh() // refresh the price dataset in the background if stale
 	if len(os.Args) < 2 {
 		cmdChat()
 		return

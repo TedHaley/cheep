@@ -95,8 +95,15 @@ Anything exported in your shell takes precedence over `keys.env`. Executor keys 
 saved inline during `cheep config`.
 
 **Cost estimates** — `/tokens` shows estimated spend per model (local models are free) and
-how much you saved by not running everything on a premium model. Prices come from a built-in
-table; tune any agent with `"price_in"` / `"price_out"` (USD per 1M tokens) in `config.json`.
+how much you saved by not running everything on a premium model. Per-token prices are fetched
+from the maintained [LiteLLM dataset](https://github.com/BerriAI/litellm) (cached in
+`~/.cheep/prices.json`, refreshed weekly), falling back to a built-in table offline; override
+any agent with `"price_in"` / `"price_out"` (USD per 1M tokens) in `config.json`.
+
+**Budget-aware routing** — executors are presented to the orchestrator cheapest-first with
+cost tiers (`free · local`, `$ cheap`, `$$ mid`, `$$$ premium`) and the project's budget, and
+it's told to prefer the cheapest executor that can do each subtask — reserving pricier models
+for hard work (a failed cheap attempt auto-escalates anyway).
 
 **Cheap-first escalation** — when a delegated subtask ends in a non-`completed` status
 (loops, times out, runs out of context, or errors), cheep automatically retries it on a more
@@ -110,9 +117,10 @@ the conversation prefix, so the repeated context across an agent's many turns is
 fraction of the input price. OpenAI-compatible endpoints (DeepSeek, etc.) cache automatically
 server-side. The cost meter reflects the savings.
 
-**Budget cap** — set an optional session ceiling with `/budget 5` (or `"budget_usd": 5` in
-`config.json`). cheep warns at 80% and stops the running task at 100%; `/budget` shows the
-current spend, `/budget off` clears it.
+**Budget cap** — set an optional **per-project** ceiling with `/budget 5` (stored per working
+directory; or a global `"budget_usd": 5` / per-project `"budgets"` map in `config.json`). cheep
+warns at 80% and stops the running task at 100%; `/budget` shows the current spend, `/budget
+off` clears it for this project.
 
 **Check connectivity** at any time:
 

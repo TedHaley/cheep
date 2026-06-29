@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -103,8 +104,10 @@ Be economical: plan and delegate rather than doing the work yourself.
   so dispatch independent subtasks together in ONE call. Each task is
   {"executor": "<name>", "subtask": "<full instructions>"}. Updating todos is NOT doing the
   work — only delegate (then verify) actually does it.
-- ROUTE each subtask to the executor whose model is best suited to it, based on the models
-  listed above. If there is no obvious best fit, pick any executor.
+- ROUTE each subtask to the CHEAPEST executor that can do it well (they are listed
+  cheapest-first with cost tiers). Reserve pricier executors for genuinely hard subtasks;
+  a failed cheap attempt auto-escalates to a stronger one, so default to cheap. Mind the
+  project budget if one is given.
 - Executors share NO memory or context with you or each other; every subtask must contain
   all the detail it needs to be done in isolation.
 - DELEGATE all execution to executors — especially web access, research, API calls, and
@@ -199,16 +202,40 @@ func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, lab
 	return r
 }
 
-func roster(execs []config.Agent) string {
+// costTier is a coarse, human-readable price band for an executor.
+func costTier(e config.Agent) string {
+	if _, _, kind := pricing.AgentRate(e); kind == "local" {
+		return "free · local"
+	}
+	switch s := pricing.Score(e); {
+	case s == 0:
+		return "free"
+	case s < 2:
+		return "$ cheap"
+	case s < 12:
+		return "$$ mid"
+	default:
+		return "$$$ premium"
+	}
+}
+
+func roster(execs []config.Agent, budget float64) string {
+	sorted := append([]config.Agent{}, execs...)
+	sort.SliceStable(sorted, func(i, j int) bool { return pricing.Score(sorted[i]) < pricing.Score(sorted[j]) })
 	var b strings.Builder
-	b.WriteString("Your executors (delegate to these by name):\n")
-	for _, e := range execs {
+	b.WriteString("Your executors, cheapest first (delegate to these by name):\n")
+	for _, e := range sorted {
 		model := e.Model
 		if model == "" {
 			model = "unknown model"
 		}
-		fmt.Fprintf(&b, "  - %q runs %q\n", e.Name, model)
+		fmt.Fprintf(&b, "  - %q runs %q  [%s]\n", e.Name, model, costTier(e))
 	}
+	if budget > 0 {
+		fmt.Fprintf(&b, "This project's budget is about $%.2f total — spend it deliberately.\n", budget)
+	}
+	b.WriteString("Prefer the cheapest executor that can do a subtask well; reserve pricier ones for " +
+		"genuinely hard work. A failed cheap attempt auto-escalates, so default to cheap.")
 	return b.String()
 }
 
@@ -491,7 +518,7 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 		Func: delegate,
 	}
 
-	system := fmt.Sprintf(orchestratorSystemTmpl, roster(cfg.Executors))
+	system := fmt.Sprintf(orchestratorSystemTmpl, roster(cfg.Executors, cfg.Budget(workdir)))
 	if isolated {
 		system += "\n\nIsolation is ON: each delegated subtask runs in its own git worktree and is " +
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +

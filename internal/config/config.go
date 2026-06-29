@@ -53,6 +53,19 @@ type Config struct {
 	// BudgetUSD caps estimated session spend in US dollars (0 = no cap). cheep
 	// warns at 80% and stops the run at 100%.
 	BudgetUSD float64 `json:"budget_usd,omitempty"`
+
+	// Budgets caps spend per project, keyed by absolute working directory. A
+	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
+	Budgets map[string]float64 `json:"budgets,omitempty"`
+}
+
+// Budget resolves the active budget for a working directory: the per-project
+// entry if set, else the global BudgetUSD.
+func (c Config) Budget(workdir string) float64 {
+	if v, ok := c.Budgets[workdir]; ok {
+		return v
+	}
+	return c.BudgetUSD
 }
 
 // Home is cheep's root directory (~/.cheep by default; override with CHEEP_HOME).

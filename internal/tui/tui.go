@@ -709,7 +709,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if m.overBudget() {
 		(&m).appendLine(0, userSt.Render("› "+text))
 		(&m).appendLine(0, errSt.Render("✗ over budget")+hintSt.Render(fmt.Sprintf(
-			" — %s of %s spent; raise or clear the cap with /budget", usd(m.spent()), usd(m.cfg.BudgetUSD))))
+			" — %s of %s spent; raise or clear the cap with /budget", usd(m.spent()), usd(m.budget()))))
 		m.active, m.follow = 0, true
 		(&m).syncViewport()
 		return m, nil
@@ -791,20 +791,26 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		f := strings.Fields(text)
 		switch {
 		case len(f) < 2:
-			if m.cfg.BudgetUSD > 0 {
-				m.footer = fmt.Sprintf("budget: %s of %s used", usd(m.spent()), usd(m.cfg.BudgetUSD))
+			if b := m.budget(); b > 0 {
+				m.footer = fmt.Sprintf("budget: %s of %s used (this project)", usd(m.spent()), usd(b))
 			} else {
-				m.footer = "no budget cap — set one with /budget 5  (or /budget off)"
+				m.footer = "no budget cap for this project — set one with /budget 5  (or /budget off)"
 			}
 		case f[1] == "off" || f[1] == "none" || f[1] == "0":
-			m.cfg.BudgetUSD, m.budgetWarned = 0, false
+			if m.cfg.Budgets != nil {
+				delete(m.cfg.Budgets, m.workdir)
+			}
+			m.budgetWarned = false
 			_ = config.Save(m.cfg)
-			m.footer = "budget cap cleared"
+			m.footer = "budget cap cleared for this project"
 		default:
 			if v, err := strconv.ParseFloat(strings.TrimPrefix(f[1], "$"), 64); err == nil && v > 0 {
-				m.cfg.BudgetUSD, m.budgetWarned = v, false
+				if m.cfg.Budgets == nil {
+					m.cfg.Budgets = map[string]float64{}
+				}
+				m.cfg.Budgets[m.workdir], m.budgetWarned = v, false
 				_ = config.Save(m.cfg)
-				m.footer = "budget cap set to " + usd(v) + " per session"
+				m.footer = "budget cap set to " + usd(v) + " for this project"
 			} else {
 				m.footer = "usage: /budget <dollars> | off"
 			}
@@ -850,27 +856,32 @@ func (m *model) appendLine(idx int, line string) {
 	m.tabs[idx].lines = append(m.tabs[idx].lines, line)
 }
 
+// budget is the active cap for the current project (or the global default).
+func (m model) budget() float64 { return m.cfg.Budget(m.workdir) }
+
 // overBudget reports whether estimated session spend has hit the cap.
 func (m model) overBudget() bool {
-	return m.cfg.BudgetUSD > 0 && m.spent() >= m.cfg.BudgetUSD
+	b := m.budget()
+	return b > 0 && m.spent() >= b
 }
 
 // enforceBudget warns at 80% of the cap and cancels a running task at 100%.
 func (m *model) enforceBudget() {
-	if m.cfg.BudgetUSD <= 0 {
+	b := m.budget()
+	if b <= 0 {
 		return
 	}
 	sp := m.spent()
 	switch {
-	case sp >= m.cfg.BudgetUSD:
+	case sp >= b:
 		if m.running && m.cancel != nil {
 			m.cancel()
 			m.footer = errSt.Render(fmt.Sprintf("✗ budget cap %s reached (%s) — stopping; raise with /budget",
-				usd(m.cfg.BudgetUSD), usd(sp)))
+				usd(b), usd(sp)))
 		}
-	case !m.budgetWarned && sp >= 0.8*m.cfg.BudgetUSD:
+	case !m.budgetWarned && sp >= 0.8*b:
 		m.budgetWarned = true
-		m.footer = fmt.Sprintf("⚠ %s of %s budget used", usd(sp), usd(m.cfg.BudgetUSD))
+		m.footer = fmt.Sprintf("⚠ %s of %s budget used", usd(sp), usd(b))
 	}
 }
 
@@ -1259,9 +1270,9 @@ func (m model) tokenSummary() string {
 	}
 	s := "Σ " + strings.Join(parts, " · ")
 	spent := m.spent()
-	switch {
-	case m.cfg.BudgetUSD > 0:
-		s += " · " + usd(spent) + "/" + usd(m.cfg.BudgetUSD)
+	switch b := m.budget(); {
+	case b > 0:
+		s += " · " + usd(spent) + "/" + usd(b)
 	case spent > 0:
 		s += " · " + usd(spent)
 	}
@@ -1316,8 +1327,8 @@ func (m model) tokenLines() []string {
 			"   %s tokens ran free on local models — ≈ %s saved at %s rates",
 			human(int(freeTokens)), usd(savings), refLabel)))
 	}
-	if m.cfg.BudgetUSD > 0 {
-		line := fmt.Sprintf("   budget cap: %s of %s used", usd(spent), usd(m.cfg.BudgetUSD))
+	if b := m.budget(); b > 0 {
+		line := fmt.Sprintf("   budget cap: %s of %s used (this project)", usd(spent), usd(b))
 		if m.overBudget() {
 			out = append(out, errSt.Render(line+" — reached"))
 		} else {
