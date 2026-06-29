@@ -102,13 +102,13 @@ type wizMsg struct {
 func (m model) openWizard() (tea.Model, tea.Cmd) {
 	m.overlay = "setupwiz"
 	m.wiz = newWizState()
-	return m, wizDiscoverCmd(m.cfg)
+	return m, wizDiscoverCmd()
 }
 
 // wizDiscoverCmd scans for local servers and API keys, and (for cloud keys)
-// lists their models, off the UI goroutine. cfg seeds a Claude option so the
-// user can always choose Anthropic and paste a key.
-func wizDiscoverCmd(cfg config.Config) tea.Cmd {
+// lists their models, off the UI goroutine. It surfaces only what actually
+// exists; cloud providers without a discovered key are added via manual entry.
+func wizDiscoverCmd() tea.Cmd {
 	return func() tea.Msg {
 		servers, keys := configtools.Discover()
 		var cands []wizCandidate

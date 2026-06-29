@@ -410,7 +410,7 @@ func (m *model) rebuild(keep bool) {
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg)}
 	if m.overlay == "setupwiz" { // first launch / unusable orchestrator — scan now
-		cmds = append(cmds, wizDiscoverCmd(m.cfg))
+		cmds = append(cmds, wizDiscoverCmd())
 	}
 	return tea.Batch(cmds...)
 }
