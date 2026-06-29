@@ -51,12 +51,42 @@ type wizState struct {
 	orch    int // index into cands, -1 = none chosen
 	execs   map[int]bool
 
-	fields []textinput.Model // manual form: provider, endpoint, model, api key
-	focus  int
-	err    string
+	fields     []textinput.Model // manual form inputs
+	focus      int
+	manualProv int // selected provider in the manual provider list
+	err        string
 
 	keyInput textinput.Model // "key" mode: paste an Anthropic key for a keyless pick
 	pending  config.Config   // config awaiting the pasted key
+}
+
+// manualProviders are the cloud backends offered in the manual setup list. All
+// but Anthropic are OpenAI-compatible; their endpoints are prefilled.
+type manualProvider struct{ label, provider, endpoint string }
+
+var manualProviders = []manualProvider{
+	{"Anthropic (Claude)", "anthropic", ""},
+	{"OpenAI", "openai", "https://api.openai.com/v1"},
+	{"Grok (xAI)", "openai", "https://api.x.ai/v1"},
+	{"DeepSeek", "openai", "https://api.deepseek.com/v1"},
+	{"Groq", "openai", "https://api.groq.com/openai/v1"},
+	{"OpenRouter", "openai", "https://openrouter.ai/api/v1"},
+	{"Mistral", "openai", "https://api.mistral.ai/v1"},
+	{"Custom (OpenAI-compatible)", "openai", ""},
+}
+
+func modelHint(p manualProvider) string {
+	switch p.label {
+	case "Anthropic (Claude)":
+		return "model id, e.g. claude-sonnet-4-6"
+	case "OpenAI":
+		return "model id, e.g. gpt-4o"
+	case "Grok (xAI)":
+		return "model id, e.g. grok-2-latest"
+	case "DeepSeek":
+		return "model id, e.g. deepseek-chat"
+	}
+	return "model id"
 }
 
 func newWizState() wizState {
@@ -108,26 +138,6 @@ func wizDiscoverCmd(cfg config.Config) tea.Cmd {
 				extra = append(extra, k.Name)
 			}
 		}
-		// Always offer Claude — even with no key found — so the user can pick it
-		// and paste a key (keeping Claude instead of being pushed to a local model).
-		hasAnthropic := false
-		for _, c := range cands {
-			if c.provider == "anthropic" {
-				hasAnthropic = true
-				break
-			}
-		}
-		if !hasAnthropic {
-			model := "claude-sonnet-4-6"
-			key := ""
-			if cfg.Orchestrator.Provider == "anthropic" {
-				if cfg.Orchestrator.Model != "" {
-					model = cfg.Orchestrator.Model
-				}
-				key = cfg.Orchestrator.APIKey
-			}
-			cands = append(cands, wizCandidate{provider: "anthropic", model: model, key: key})
-		}
 		return wizMsg{cands: cands, extra: extra}
 	}
 }
@@ -136,6 +146,8 @@ func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.wiz.mode {
 	case "manual":
 		return m.updateWizManual(msg)
+	case "mfields":
+		return m.updateWizManualFields(msg)
 	case "key":
 		return m.updateWizKey(msg)
 	}
@@ -180,27 +192,13 @@ func (m model) updateWiz(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// enterManual opens the manual provider list (Anthropic, OpenAI, Grok, …).
 func (m model) enterManual() (tea.Model, tea.Cmd) {
-	mk := func(placeholder, val string) textinput.Model {
-		ti := textinput.New()
-		ti.Placeholder = placeholder
-		ti.SetValue(val)
-		ti.Width = max(20, m.w-26)
-		return ti
-	}
 	w := &m.wiz
 	w.mode = "manual"
+	w.manualProv = 0
 	w.err = ""
-	w.focus = 0
-	w.fields = []textinput.Model{
-		mk("anthropic | openai", "openai"),
-		mk("http://…  (leave blank for Anthropic)", ""),
-		mk("model id, e.g. claude-sonnet-4-6 or qwen/…", ""),
-		mk("API key (optional; blank uses your env)", ""),
-	}
-	w.fields[3].EchoMode = textinput.EchoPassword
-	w.fields[0].Focus()
-	return m, textinput.Blink
+	return m, nil
 }
 
 func (m model) updateWizManual(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -210,6 +208,54 @@ func (m model) updateWizManual(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		w.mode, w.err = "pick", ""
+	case "up", "k":
+		if w.manualProv > 0 {
+			w.manualProv--
+		}
+	case "down", "j":
+		if w.manualProv < len(manualProviders)-1 {
+			w.manualProv++
+		}
+	case "enter":
+		return m.enterManualFields()
+	}
+	return m, nil
+}
+
+// enterManualFields shows the credential inputs for the chosen provider, with the
+// endpoint prefilled.
+func (m model) enterManualFields() (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	p := manualProviders[w.manualProv]
+	mk := func(placeholder, val string) textinput.Model {
+		ti := textinput.New()
+		ti.Placeholder = placeholder
+		ti.SetValue(val)
+		ti.Width = max(20, m.w-26)
+		return ti
+	}
+	w.mode = "mfields"
+	w.err = ""
+	w.focus = 0
+	mdl := mk(modelHint(p), "")
+	key := mk("API key", "")
+	key.EchoMode = textinput.EchoPassword
+	if p.provider == "anthropic" {
+		w.fields = []textinput.Model{mdl, key}
+	} else {
+		w.fields = []textinput.Model{mk("https://… endpoint", p.endpoint), mdl, key}
+	}
+	w.fields[0].Focus()
+	return m, textinput.Blink
+}
+
+func (m model) updateWizManualFields(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	w := &m.wiz
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		w.mode, w.err = "manual", "" // back to the provider list
 		return m, nil
 	case "enter":
 		return m.saveManual()
@@ -234,23 +280,32 @@ func (m model) updateWizManual(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) saveManual() (tea.Model, tea.Cmd) {
 	w := &m.wiz
-	prov := strings.ToLower(strings.TrimSpace(w.fields[0].Value()))
-	endpoint := strings.TrimSpace(w.fields[1].Value())
-	mdl := strings.TrimSpace(w.fields[2].Value())
-	key := strings.TrimSpace(w.fields[3].Value())
+	p := manualProviders[w.manualProv]
+	var endpoint, mdl, key string
+	if p.provider == "anthropic" {
+		mdl = strings.TrimSpace(w.fields[0].Value())
+		key = strings.TrimSpace(w.fields[1].Value())
+	} else {
+		endpoint = strings.TrimSpace(w.fields[0].Value())
+		mdl = strings.TrimSpace(w.fields[1].Value())
+		key = strings.TrimSpace(w.fields[2].Value())
+	}
 	switch {
-	case prov != "anthropic" && prov != "openai":
-		w.err = `provider must be "anthropic" or "openai"`
-		return m, nil
 	case mdl == "":
 		w.err = "a model id is required"
 		return m, nil
-	case prov == "openai" && endpoint == "":
-		w.err = "an endpoint is required for openai-compatible providers"
+	case p.provider == "openai" && endpoint == "":
+		w.err = "an endpoint is required"
+		return m, nil
+	case p.provider == "anthropic" && key == "" && os.Getenv("ANTHROPIC_API_KEY") == "":
+		w.err = "an API key is required for Anthropic"
 		return m, nil
 	}
-	cfg := config.Config{Orchestrator: config.Agent{Provider: prov, Endpoint: endpoint, Model: mdl, APIKey: key}}
-	return m.applyWizConfig(cfg, "manual setup saved")
+	if p.provider == "anthropic" && key != "" {
+		_ = config.SetKey("ANTHROPIC_API_KEY", key)
+	}
+	cfg := config.Config{Orchestrator: config.Agent{Provider: p.provider, Endpoint: endpoint, Model: mdl, APIKey: key}}
+	return m.applyWizConfig(cfg, "manual setup saved · "+p.label)
 }
 
 func (m model) saveWizard() (tea.Model, tea.Cmd) {
@@ -365,6 +420,8 @@ func (m model) viewWiz() string {
 	switch m.wiz.mode {
 	case "manual":
 		return m.viewWizManual(title)
+	case "mfields":
+		return m.viewWizManualFields(title)
 	case "key":
 		return m.viewWizKey(title)
 	}
@@ -421,10 +478,42 @@ func (m model) viewWizKey(title string) string {
 		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
 
-func (m model) viewWizManual(title string) string {
+func (m model) viewWizManual(title string) string { // provider list
 	w := m.wiz
-	labels := []string{"provider", "endpoint", "model", "api key"}
-	lines := []string{title + hintSt.Render("  ·  manual orchestrator"), ""}
+	lines := []string{title + hintSt.Render("  ·  manual setup"),
+		hintSt.Render("Choose a provider, then enter your credentials."), ""}
+	for i, p := range manualProviders {
+		cur := "  "
+		if i == w.manualProv {
+			cur = todoProgSt.Render("▸ ")
+		}
+		where := p.endpoint
+		if where == "" {
+			if p.provider == "anthropic" {
+				where = "api.anthropic.com"
+			} else {
+				where = "you'll enter the endpoint"
+			}
+		}
+		lines = append(lines, cur+p.label+hintSt.Render("  "+where))
+	}
+	if w.err != "" {
+		lines = append(lines, "", errSt.Render("✗ "+w.err))
+	}
+	lines = append(lines, "",
+		hintSt.Render("↑/↓ move · enter choose · esc back to discovered list"))
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
+		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+}
+
+func (m model) viewWizManualFields(title string) string {
+	w := m.wiz
+	p := manualProviders[w.manualProv]
+	labels := []string{"endpoint", "model", "api key"}
+	if p.provider == "anthropic" {
+		labels = []string{"model", "api key"}
+	}
+	lines := []string{title + hintSt.Render("  ·  "+p.label), ""}
 	for i, f := range w.fields {
 		marker := "  "
 		if i == w.focus {
@@ -436,7 +525,7 @@ func (m model) viewWizManual(title string) string {
 		lines = append(lines, "", errSt.Render("✗ "+w.err))
 	}
 	lines = append(lines, "",
-		hintSt.Render("tab / ↑↓ move · enter save · esc back to discovered list"))
+		hintSt.Render("tab / ↑↓ move · enter save · esc back to providers"))
 	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
 		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }

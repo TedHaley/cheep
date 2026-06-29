@@ -285,13 +285,13 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 			default: // drop rather than block an agent if the UI falls behind
 			}
 		},
-		tabs:   []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg, nil)}},
+		tabs:      []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg, nil)}},
 		byName:    map[string]int{"orchestrator": 0, "cheep": 0},
 		usage:     map[string][2]int{},
 		usageRole: map[string][2]int{},
-		input:  ta,
-		sp:     sp,
-		vp:     viewport.New(80, 20),
+		input:     ta,
+		sp:        sp,
+		vp:        viewport.New(80, 20),
 	}
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
@@ -346,7 +346,7 @@ func welcomeLines(cfg config.Config, conn map[string]string) []string {
 	}
 	info := []string{"orchestrator | " + mark("orchestrator", cfg.Orchestrator.Model)}
 	if len(cfg.Executors) == 0 {
-		info = append(info, "mode         | solo")
+		info = append(info, "executors    | none — orchestrator runs everything itself")
 	}
 	// Collapse interchangeable executors (same model) into one line; the model
 	// picks which instance to use, so the type is what matters.
@@ -719,7 +719,6 @@ func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 	run := func() tea.Msg { return doneMsg{s.SendCtx(ctx, text)} }
 	return m, tea.Batch(m.sp.Tick, run)
 }
-
 
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	switch strings.Fields(text)[0] {
