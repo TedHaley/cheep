@@ -364,7 +364,7 @@ func welcomeLines(cfg config.Config, conn map[string]string) []string {
 		info = append(info, "executor     | "+mark("exec:"+first[model], model))
 	}
 	boxBody := strings.Join(append([]string{
-		lipgloss.NewStyle().Bold(true).Render(">_ cheep " + Version),
+		lipgloss.NewStyle().Bold(true).Render(">_ CHEEP! " + Version),
 		"",
 	}, append(info, hintSt.Render(shortWorkdir()))...), "\n")
 	box := lipgloss.NewStyle().

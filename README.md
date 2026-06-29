@@ -1,4 +1,4 @@
-# cheep
+# CHEEP!
 
 > A smart orchestrator plans and verifies. Cheap executors do the work — mix cloud and local, or run entirely local for almost nothing.
 
