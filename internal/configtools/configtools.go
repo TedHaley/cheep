@@ -53,14 +53,44 @@ func mask(v string) string {
 // ---- discovery -------------------------------------------------------------
 
 type keyHit struct {
-	Name    string `json:"name"`
-	FoundIn string `json:"found_in"`
-	Preview string `json:"preview"`
-	value   string
+	Name     string `json:"name"`
+	FoundIn  string `json:"found_in"`
+	Preview  string `json:"preview"`
+	Provider string `json:"suggested_provider,omitempty"` // how to configure it
+	Endpoint string `json:"suggested_endpoint,omitempty"`
+	value    string
 }
 
 func looksLikeKey(name string) bool {
 	return strings.HasSuffix(name, "_API_KEY") || strings.HasSuffix(name, "_KEY") || strings.HasSuffix(name, "_TOKEN")
+}
+
+// suggestProvider maps a known key name to how cheep should use it. Anthropic is
+// native; the rest are OpenAI-compatible endpoints.
+func suggestProvider(name string) (provider, endpoint string) {
+	switch name {
+	case "ANTHROPIC_API_KEY":
+		return "anthropic", ""
+	case "OPENAI_API_KEY":
+		return "openai", "https://api.openai.com/v1"
+	case "DEEPSEEK_API_KEY":
+		return "openai", "https://api.deepseek.com/v1"
+	case "XAI_API_KEY", "GROK_API_KEY":
+		return "openai", "https://api.x.ai/v1"
+	case "GROQ_API_KEY":
+		return "openai", "https://api.groq.com/openai/v1"
+	case "OPENROUTER_API_KEY":
+		return "openai", "https://openrouter.ai/api/v1"
+	case "MISTRAL_API_KEY":
+		return "openai", "https://api.mistral.ai/v1"
+	case "TOGETHER_API_KEY":
+		return "openai", "https://api.together.xyz/v1"
+	case "PERPLEXITY_API_KEY":
+		return "openai", "https://api.perplexity.ai"
+	case "GEMINI_API_KEY", "GOOGLE_API_KEY":
+		return "openai", "https://generativelanguage.googleapis.com/v1beta/openai"
+	}
+	return "", ""
 }
 
 // scanKeys collects API-key-looking variables from the environment and dotfiles.
@@ -74,7 +104,8 @@ func scanKeys() []keyHit {
 			return
 		}
 		seen[name] = true
-		out = append(out, keyHit{Name: name, FoundIn: src, Preview: mask(val), value: val})
+		prov, ep := suggestProvider(name)
+		out = append(out, keyHit{Name: name, FoundIn: src, Preview: mask(val), Provider: prov, Endpoint: ep, value: val})
 	}
 	for _, kv := range os.Environ() {
 		if k, v, ok := strings.Cut(kv, "="); ok {
