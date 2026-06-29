@@ -96,6 +96,7 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 	a := s.a
 	s.messages = append(s.messages, core.Message{Role: "user", Text: userText})
 	inTok, outTok := 0, 0
+	emptyNudges := 0    // times we re-prompted an empty turn (small models stop after a tool)
 	var recent []string // tool-call signatures, for stuck detection
 
 	for turn := 1; turn <= a.MaxTurns; turn++ {
@@ -124,6 +125,23 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 		}
 
 		if len(msg.ToolCalls) == 0 {
+			if strings.TrimSpace(msg.Text) == "" {
+				// The model ended its turn with no answer. If it just ran a tool,
+				// nudge it once to actually reply (so the user isn't left blank);
+				// otherwise surface a visible note rather than nothing.
+				prevRole := ""
+				if len(s.messages) >= 2 {
+					prevRole = s.messages[len(s.messages)-2].Role
+				}
+				if emptyNudges < 1 && prevRole == "tool" {
+					emptyNudges++
+					s.messages = s.messages[:len(s.messages)-1] // drop the empty turn
+					s.messages = append(s.messages, core.Message{Role: "user",
+						Text: "You ran a tool but didn't reply. Answer my request in plain text now — summarize what you found. Do not call any tools."})
+					continue
+				}
+				a.emit(core.Event{Type: "text", Text: "_(no response — the model ended its turn without replying; try rephrasing)_"})
+			}
 			return RunResult{Status: "completed", Output: msg.Text,
 				Turns: turn, InputTokens: inTok, OutputTokens: outTok}
 		}
