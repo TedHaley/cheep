@@ -151,6 +151,7 @@ func (m model) viewHelp() string {
 		"         ctrl+w (or /close) closes the focused executor tab",
 		"         /keeptabs toggles auto-close of finished executor tabs",
 		"cancel:  esc cancels a running task",
+		"input:   ↑/↓ recall previous inputs (edit and resend); shift+enter = newline",
 		"",
 		"commands:",
 		"  /config          set up agents from discovered servers + keys",

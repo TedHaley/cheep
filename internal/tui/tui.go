@@ -86,6 +86,10 @@ type model struct {
 	queue   []string // messages typed while a task is running
 	footer  string
 
+	inputHist []string // submitted inputs, for up/down recall
+	histIdx   int      // cursor into inputHist (== len means "current draft")
+	histDraft string   // the in-progress line saved when you start browsing history
+
 	openTodos    int  // non-done todos from the orchestrator's latest update_todos
 	delegated    bool // did the orchestrator call delegate this run?
 	nudges       int  // auto-continue count since the last user message
@@ -647,6 +651,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				(&m).syncViewport()
 			}
 			return m, nil
+		case "up":
+			// Recall previous input when the cursor is on the first line;
+			// otherwise fall through to normal cursor movement in a multi-line draft.
+			if m.input.Line() == 0 && len(m.inputHist) > 0 {
+				(&m).historyPrev()
+				(&m).relayout()
+				return m, nil
+			}
+		case "down":
+			if m.input.Line() == m.input.LineCount()-1 && m.histIdx < len(m.inputHist) {
+				(&m).historyNext()
+				(&m).relayout()
+				return m, nil
+			}
 		case "pgup":
 			m.follow = false
 			m.vp, _ = m.vp.Update(msg)
@@ -678,11 +696,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// historyPrev recalls an older input; historyNext moves toward the live draft.
+func (m *model) historyPrev() {
+	if len(m.inputHist) == 0 {
+		return
+	}
+	if m.histIdx >= len(m.inputHist) {
+		m.histDraft = m.input.Value() // save the in-progress line before browsing
+	}
+	if m.histIdx > 0 {
+		m.histIdx--
+	}
+	m.input.SetValue(m.inputHist[m.histIdx])
+	m.input.CursorEnd()
+}
+
+func (m *model) historyNext() {
+	if m.histIdx >= len(m.inputHist) {
+		return
+	}
+	m.histIdx++
+	if m.histIdx >= len(m.inputHist) {
+		m.input.SetValue(m.histDraft)
+	} else {
+		m.input.SetValue(m.inputHist[m.histIdx])
+	}
+	m.input.CursorEnd()
+}
+
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
 		return m, nil
 	}
+	// Record in history (skip consecutive duplicates) and reset the cursor to "new".
+	if n := len(m.inputHist); n == 0 || m.inputHist[n-1] != text {
+		m.inputHist = append(m.inputHist, text)
+	}
+	m.histIdx = len(m.inputHist)
+	m.histDraft = ""
 	m.input.Reset()
 	(&m).relayout()
 	if strings.HasPrefix(text, "/") {
