@@ -131,7 +131,9 @@
       <li><b>Self-healing.</b> Executors that loop, exhaust their context, or error are detected and recovered automatically.</li>
       <li><b>Resumable history.</b> Conversations are saved as transcripts; resume any past session with <code>/history</code>.</li>
       <li><b>Zero-config start.</b> First launch discovers local model servers and API keys on your machine and walks you through setup.</li>
-      <li><b>Tools &amp; MCP.</b> Built-in file/shell tools, plus connect MCP servers to give every agent more capabilities.</li>
+      <li><b>Loop until green.</b> An <code>iterate_until</code> primitive re-runs a subtask on a cheap executor and re-runs your check (tests, build, lint) until it passes — bounded by rounds and budget. Loops on cheap models are nearly free, so iterate aggressively.</li>
+      <li><b>Skills.</b> Drop markdown knowledge files in <code>~/.cheep/skills</code>; agents load one on demand (<code>use_skill</code>) instead of bloating every prompt — less context, less cost.</li>
+      <li><b>Tools &amp; MCP.</b> Built-in file/shell tools, plus connect MCP servers (stdio or HTTP) to give every agent more capabilities.</li>
       <li><b>One static binary.</b> No runtime, no dependencies. <code>brew install</code>, <code>go install</code>, or download.</li>
     </ul>
   </section>

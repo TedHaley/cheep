@@ -212,6 +212,17 @@ scoped to specific roles with `roles` (`"orchestrator"`, `"executor"`; default b
 On launch you'll see `mcp "fs": N tool(s)`. A failed server is reported and skipped — cheep
 still runs.
 
+**Skills** — drop markdown knowledge files in `~/.cheep/skills/*.md` (optional `name` /
+`description` front-matter). The planner calls `list_skills` to see them and `use_skill(name)`
+to load one into context **only when relevant** — keeping prompts small (and cheap) instead of
+stuffing all knowledge into every request.
+
+**Loops** — for work with an objective check, the orchestrator can call
+`iterate_until{ "subtask", "check", "executor" }`: it re-runs the subtask on a cheap executor
+and re-runs the shell `check` (e.g. `go test ./...`) until it exits 0, feeding each failure
+back in — bounded by `max_rounds` and the budget. Iterating on cheap/local executors is nearly
+free, so it's the preferred way to "fix until green."
+
 ## How it works
 
 ```

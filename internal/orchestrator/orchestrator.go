@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/provider"
+	"github.com/TedHaley/cheep/internal/skills"
 	"github.com/TedHaley/cheep/internal/tool"
 	"github.com/TedHaley/cheep/internal/worktree"
 )
@@ -125,6 +127,10 @@ Be economical: plan and delegate rather than doing the work yourself.
   auto-escalates a failed subtask to a more capable executor before returning (see the
   "escalation" field), so a non-"completed" result means even the strongest tier struggled —
   split the subtask smaller, clarify it, or fix the blocker, then delegate again.
+- LOOP to convergence: when work has an objective check (tests pass, build succeeds, lint
+  clean), call iterate_until{"subtask","check","executor"} instead of re-delegating by hand —
+  it re-runs the work on a cheap executor and re-runs the check until it passes (bounded).
+  Iterating on cheap/local executors is nearly free, so prefer it for fix-until-green loops.
 - Plan, delegate, and verify — that is your whole job.
 - To CHANGE cheep's setup (switch your own model, add/remove executors, add API keys) when
   the user asks, use the config tools: discover (find local servers + keys), get_config,
@@ -256,6 +262,57 @@ func usable(a config.Agent) bool {
 	return a.Model != "" && !(a.Provider == "anthropic" && a.APIKey == "")
 }
 
+func strArg(a map[string]any, k string) string { s, _ := a[k].(string); return s }
+
+func intArg(a map[string]any, k string, def int) int {
+	if v, ok := a[k].(float64); ok && v > 0 {
+		return int(v)
+	}
+	return def
+}
+
+func clip(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…(truncated)"
+	}
+	return s
+}
+
+// runCheck runs a shell predicate in dir and returns its combined output + exit code.
+func runCheck(ctx context.Context, dir, cmd string) (string, int) {
+	c := exec.CommandContext(ctx, "bash", "-lc", cmd)
+	c.Dir = dir
+	out, err := c.CombinedOutput()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return string(out), ee.ExitCode()
+		}
+		return string(out) + err.Error(), -1
+	}
+	return string(out), 0
+}
+
+func iterRes(status string, rounds int, exName, check, out, note string) string {
+	res := map[string]any{
+		"status": status, "rounds": rounds, "executor": exName, "check": check,
+		"output": clip(strings.TrimSpace(out), 4000),
+	}
+	if note != "" {
+		res["note"] = note
+	}
+	b, _ := json.MarshalIndent(res, "", "  ")
+	return string(b)
+}
+
+// skillHint nudges the planner to consult skills when any exist.
+func skillHint(skillTools []core.Tool) string {
+	if len(skillTools) == 0 {
+		return ""
+	}
+	return "\n\nSkills: project knowledge files are available — call list_skills to see them and " +
+		"use_skill(name) to load one before relevant work; fold what you learn into the subtasks you delegate."
+}
+
 // escalateTarget returns the cheapest still-untried, usable executor strictly
 // pricier than curr — the next rung up the cheap-first escalation ladder, or ""
 // when nothing higher is available.
@@ -312,17 +369,21 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, chatSystem,
 			nil, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	case ModePlan:
-		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem,
-			append(tool.MakeReadOnly(workdir), extraOrch...), cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
+		planTools := append(tool.MakeReadOnly(workdir), extraOrch...)
+		planTools = append(planTools, skills.Tools()...)
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem+skillHint(skills.Tools()),
+			planTools, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	}
 
 	// ModeAuto, solo: no executors, the orchestrator does the work itself, so it
 	// gets both role's tools.
 	if len(cfg.Executors) == 0 {
+		skillTools := skills.Tools()
 		soloTools := append(tool.Make(workdir, true), extraOrch...)
 		soloTools = append(soloTools, extraExec...)
 		soloTools = append(soloTools, configtools.Tools()...)
-		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem,
+		soloTools = append(soloTools, skillTools...)
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools),
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		return solo, nil
@@ -391,6 +452,66 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 		}
 		r.InputTokens, r.OutputTokens, r.Turns = totIn, totOut, totTurns
 		return r, rt, trail
+	}
+
+	// cheapest executor — the default tier for loops.
+	cheapest := order[0]
+	for _, n := range order {
+		if scoreByName[n] < scoreByName[cheapest] {
+			cheapest = n
+		}
+	}
+
+	// iterateUntil runs a subtask on a (cheap) executor and re-runs a shell check
+	// until it passes, feeding each failure back in. Bounded by max_rounds and the
+	// run context (so the budget cap stops it too). Loops on cheap executors are
+	// nearly free — iterate aggressively.
+	iterateUntil := func(ctx context.Context, args map[string]any) string {
+		subtask, check := strArg(args, "subtask"), strArg(args, "check")
+		if subtask == "" || check == "" {
+			return `ERROR: "subtask" and "check" are required`
+		}
+		ex := strArg(args, "executor")
+		if _, ok := runtimes[ex]; !ok {
+			ex = cheapest
+		}
+		maxRounds := intArg(args, "max_rounds", 5)
+		task := subtask
+		var lastOut string
+		for round := 1; round <= maxRounds; round++ {
+			if ctx.Err() != nil {
+				return iterRes("aborted", round-1, ex, check, lastOut, "cancelled")
+			}
+			_, rt, _ := runJob(ctx, workdir, task, ex, round)
+			out, code := runCheck(ctx, workdir, check)
+			lastOut = out
+			onEvent(core.Event{Agent: "cheep", Type: "status",
+				Status: fmt.Sprintf("iterate round %d/%d on %s — check exit %d", round, maxRounds, rt.name, code)})
+			if code == 0 {
+				return iterRes("passed", round, rt.name, check, out, "")
+			}
+			task = fmt.Sprintf("%s\n\nRound %d: the check `%s` failed (exit %d). Output:\n%s\n\n"+
+				"Fix the underlying cause so the check passes.", subtask, round, check, code, clip(out, 4000))
+		}
+		return iterRes("failed", maxRounds, ex, check, lastOut, "check still failing after max_rounds")
+	}
+
+	iterateTool := core.Tool{
+		Name: "iterate_until",
+		Description: "Run a subtask on a cheap executor and re-run a shell CHECK until it passes, " +
+			"feeding each failure back in (bounded). Use for work with an objective pass/fail signal — " +
+			"tests, build, lint. Cheaper than re-delegating by hand, and loops on cheap executors are nearly free.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"subtask":    map[string]any{"type": "string", "description": "What to do each round (self-contained)."},
+				"check":      map[string]any{"type": "string", "description": "Shell command that exits 0 when done, e.g. \"go test ./...\"."},
+				"executor":   map[string]any{"type": "string", "description": "Executor to run on (default: the cheapest)."},
+				"max_rounds": map[string]any{"type": "integer", "description": "Max iterations (default 5)."},
+			},
+			"required": []string{"subtask", "check"},
+		},
+		Func: iterateUntil,
 	}
 
 	delegate := func(ctx context.Context, args map[string]any) string {
@@ -525,9 +646,12 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
 			"follow-up subtask (or resolve it yourself with git) before continuing."
 	}
-	tools := append(tool.Make(workdir, false), delegateTool)
+	skillTools := skills.Tools()
+	system += skillHint(skillTools)
+	tools := append(tool.Make(workdir, false), delegateTool, iterateTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
+	tools = append(tools, skillTools...)
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
 		cfg.Orchestrator.MaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget
