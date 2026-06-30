@@ -490,6 +490,7 @@ func (m *model) relayout() {
 		lines = 6
 	}
 	m.input.SetHeight(lines)
+	m.input.CursorEnd()
 	header := 0
 	if len(m.tabs) > 0 {
 		header = len(todoHeaderLines(m.tabs[m.active].todos))
