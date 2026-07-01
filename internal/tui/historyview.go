@@ -55,7 +55,8 @@ func (m model) openHistory() (tea.Model, tea.Cmd) {
 func (m model) updateHistory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		return m, tea.Quit
+		m.overlay = ""
+		return m, nil
 	case "esc", "q":
 		m.overlay = ""
 		return m, nil
