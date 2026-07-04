@@ -34,8 +34,23 @@ var slashCmds = []slashCmd{
 	{"/keeptabs", "toggle auto-close of finished executor tabs"},
 	{"/close", "close the focused executor tab"},
 	{"/clear", "reset the conversation"},
+	{"/prompts", "list prompt templates (invoke as /name)"},
 	{"/help", "show help"},
 	{"/exit", "quit cheep"},
+}
+
+// slashOptions merges the built-in commands with the workspace's prompt
+// templates, so /name templates complete like native commands.
+func (m *model) slashOptions() []slashCmd {
+	out := append([]slashCmd{}, slashCmds...)
+	for _, t := range m.promptTpls {
+		desc := t.Description
+		if desc == "" {
+			desc = "prompt template"
+		}
+		out = append(out, slashCmd{"/" + t.Name, desc})
+	}
+	return out
 }
 
 type compState struct {
@@ -54,7 +69,7 @@ func (m *model) updateCompletions() {
 	}
 	if strings.HasPrefix(val, "/") && !strings.ContainsAny(val, " \n") {
 		var opts []string
-		for _, c := range slashCmds {
+		for _, c := range m.slashOptions() {
 			if strings.HasPrefix(c.name, val) {
 				opts = append(opts, c.name)
 			}
@@ -109,7 +124,7 @@ func (m model) viewCompletions() string {
 		return ""
 	}
 	help := map[string]string{}
-	for _, c := range slashCmds {
+	for _, c := range (&m).slashOptions() {
 		help[c.name] = c.help
 	}
 	sel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))

@@ -35,6 +35,7 @@ import (
 	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/pricing"
+	"github.com/TedHaley/cheep/internal/prompts"
 	"github.com/TedHaley/cheep/internal/provider"
 )
 
@@ -118,8 +119,9 @@ type model struct {
 	gate      *approve.Gate     // approval gating for shared-workspace tools
 	approvals []approve.Request // pending approval requests (FIFO)
 
-	comp     compState // input completion dropdown (slash commands, @-files)
-	fileList []string  // workspace files for @-mentions
+	comp       compState          // input completion dropdown (slash commands, @-files)
+	fileList   []string           // workspace files for @-mentions
+	promptTpls []prompts.Template // /name prompt templates (project + global)
 
 	// overlay: "" (none) | "help" | "setup" | "setupwiz" | "approval"
 	overlay string
@@ -314,15 +316,16 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 
 	gateMode, _ := approve.ParseMode(cfg.ApprovalMode)
 	m := model{
-		cfg:       cfg,
-		workdir:   workdir,
-		gate:      approve.New(gateMode),
-		fileList:  loadFileList(workdir),
-		mode:      orchestrator.ModeAuto,
-		extraOrch: extraOrch,
-		extraExec: extraExec,
-		keepTabs:  cfg.KeepTabs,
-		follow:    true,
+		cfg:        cfg,
+		workdir:    workdir,
+		gate:       approve.New(gateMode),
+		fileList:   loadFileList(workdir),
+		promptTpls: prompts.List(workdir),
+		mode:       orchestrator.ModeAuto,
+		extraOrch:  extraOrch,
+		extraExec:  extraExec,
+		keepTabs:   cfg.KeepTabs,
+		follow:     true,
 		onEvent: func(e core.Event) {
 			select {
 			case events <- e:
@@ -438,6 +441,7 @@ func shortWorkdir() string {
 }
 
 func (m *model) rebuild(keep bool) {
+	m.promptTpls = prompts.List(m.workdir) // pick up new/edited templates
 	var hist []core.Message
 	if keep && m.session != nil {
 		hist = m.session.History()
@@ -914,9 +918,16 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.started = time.Now()
 		return m, tea.Batch(m.sp.Tick, bashCmd(cmdStr))
 	}
+	return m.sendUser(text, userSt.Render("› "+text))
+}
+
+// sendUser routes a user message to the orchestrator with the usual guards
+// (no session, task already running, over budget). display is the line shown
+// in the log — for prompt templates it is the typed /name, not the expansion.
+func (m model) sendUser(text, display string) (tea.Model, tea.Cmd) {
 	if m.session == nil {
 		// Show the message and a clear, actionable error in the conversation.
-		(&m).appendLine(0, userSt.Render("› "+text))
+		(&m).appendLine(0, display)
 		(&m).appendLine(0, errSt.Render("✗ can't run")+hintSt.Render(" — "+errText(m.buildErr)+"  ·  fix with /config or /setup"))
 		m.active = 0
 		m.follow = true
@@ -926,14 +937,14 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if m.running {
 		// Queue it — it runs automatically when the current task finishes.
 		m.queue = append(m.queue, text)
-		(&m).appendLine(0, userSt.Render("› "+text)+"  "+hintSt.Render("(queued)"))
+		(&m).appendLine(0, display+"  "+hintSt.Render("(queued)"))
 		m.active = 0
 		m.follow = true
 		(&m).syncViewport()
 		return m, nil
 	}
 	if m.overBudget() {
-		(&m).appendLine(0, userSt.Render("› "+text))
+		(&m).appendLine(0, display)
 		(&m).appendLine(0, errSt.Render("✗ over budget")+hintSt.Render(fmt.Sprintf(
 			" — %s of %s spent; raise or clear the cap with /budget", usd(m.spent()), usd(m.budget()))))
 		m.active, m.follow = 0, true
@@ -943,7 +954,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.nudges = 0
 	m.openTodos = 0
 	m.tabs[0].todos = nil // dismiss the previous task's checklist
-	return m.startTask(text)
+	return m.runMessage(text, display)
 }
 
 func (m model) startTask(text string) (tea.Model, tea.Cmd) {
@@ -1084,7 +1095,27 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m.openSetup()
 	case "/help", "/?":
 		m.overlay = "help"
+	case "/prompts":
+		if len(m.promptTpls) == 0 {
+			m.footer = "no prompt templates — drop markdown files in .cheep/prompts/ or ~/.cheep/prompts/"
+			return m, nil
+		}
+		m.appendLine(m.active, hintSt.Render("prompt templates (invoke as /name [args]):"))
+		for _, t := range m.promptTpls {
+			line := "  /" + t.Name
+			if t.Description != "" {
+				line += hintSt.Render("  — " + t.Description)
+			}
+			m.appendLine(m.active, line)
+		}
+		m.follow = true
+		(&m).syncViewport()
 	default:
+		name := strings.TrimPrefix(strings.Fields(text)[0], "/")
+		if t, ok := prompts.Find(m.workdir, name); ok {
+			args := strings.TrimSpace(strings.TrimPrefix(text, "/"+name))
+			return m.sendUser(prompts.Expand(t, args), userSt.Render("› "+text))
+		}
 		m.footer = "unknown command " + strings.Fields(text)[0]
 	}
 	return m, nil
