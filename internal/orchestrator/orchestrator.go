@@ -341,10 +341,21 @@ func rescueAgent(cfg config.Config, onEvent core.EventFunc) *agent.Agent {
 	return nil
 }
 
-// Build returns the orchestrator agent. extraOrch/extraExec hold tools
-// discovered at runtime (e.g. MCP), added to the orchestrator and executors
-// respectively. In solo mode the agent gets both.
-func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch, extraExec []core.Tool, onEvent core.EventFunc) (*agent.Agent, error) {
+// Options configures Build. ExtraOrch/ExtraExec hold tools discovered at
+// runtime (e.g. MCP), added to the orchestrator and executors respectively; in
+// solo mode the agent gets both.
+type Options struct {
+	Isolate   bool
+	Mode      Mode
+	ExtraOrch []core.Tool
+	ExtraExec []core.Tool
+	OnEvent   core.EventFunc
+}
+
+// Build returns the orchestrator agent wired per opt.
+func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error) {
+	isolate, mode := opt.Isolate, opt.Mode
+	extraOrch, extraExec, onEvent := opt.ExtraOrch, opt.ExtraExec, opt.OnEvent
 	// If the orchestrator can't run (no key / no model), fall back to a reachable
 	// executor so the user can fix the orchestrator config conversationally.
 	if !usable(cfg.Orchestrator) {

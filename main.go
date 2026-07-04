@@ -169,7 +169,9 @@ func lineREPL(cfg config.Config, workdir string, extraOrch, extraExec []core.Too
 		if keepHistory && session != nil {
 			hist = session.History()
 		}
-		orch, err := orchestrator.Build(cfg, workdir, true, mode, extraOrch, extraExec, onEvent)
+		orch, err := orchestrator.Build(cfg, workdir, orchestrator.Options{
+			Isolate: true, Mode: mode, ExtraOrch: extraOrch, ExtraExec: extraExec, OnEvent: onEvent,
+		})
 		buildErr = err
 		if err != nil {
 			session = nil
@@ -522,7 +524,9 @@ func cmdRun(argv []string) {
 	cfg := ensureConfig()
 	mt, mcpSess := startMCP(cfg)
 	defer mcpSess.Close()
-	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, mt.Orchestrator, mt.Executor, printer())
+	orch, err := orchestrator.Build(cfg, *workdir, orchestrator.Options{
+		Isolate: *isolate, Mode: orchestrator.ModeAuto, ExtraOrch: mt.Orchestrator, ExtraExec: mt.Executor, OnEvent: printer(),
+	})
 	if err != nil {
 		fatal(err)
 	}

@@ -95,7 +95,9 @@ func (m model) resumeHistory(id string) (tea.Model, tea.Cmd) {
 	(&m).saveHistory() // keep the session we're leaving
 
 	m.histID, m.histStarted, m.histTitle = r.ID, r.Started, r.Title
-	orch, berr := orchestrator.Build(m.cfg, m.workdir, true, m.mode, m.extraOrch, m.extraExec, m.onEvent)
+	orch, berr := orchestrator.Build(m.cfg, m.workdir, orchestrator.Options{
+		Isolate: true, Mode: m.mode, ExtraOrch: m.extraOrch, ExtraExec: m.extraExec, OnEvent: m.onEvent,
+	})
 	m.buildErr = berr
 	if berr != nil {
 		m.session = nil

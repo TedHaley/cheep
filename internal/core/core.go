@@ -45,20 +45,21 @@ type Provider interface {
 	Complete(ctx context.Context, model, system string, messages []Message, tools []Tool) (Turn, error)
 }
 
-// Event is emitted during an agent run for live display.
+// Event is emitted during an agent run for live display. The json tags define
+// the wire shape of `cheep run --json` output — treat them as a public API.
 type Event struct {
-	Agent  string
-	Type   string // "text" | "tool_call" | "tool_result" | "status" | "error" | "progress"
-	Text   string
-	Tool   string
-	Args   map[string]any
-	Result string
-	Status string
-	Turn   int    // progress: current turn
-	Tokens int    // progress: cumulative input tokens
-	Model  string // usage: the model that produced this turn
-	InTok  int    // usage: input tokens this turn
-	OutTok int    // usage: output tokens this turn
+	Agent  string         `json:"agent"`
+	Type   string         `json:"type"` // "text" | "tool_call" | "tool_result" | "status" | "error" | "progress"
+	Text   string         `json:"text,omitempty"`
+	Tool   string         `json:"tool,omitempty"`
+	Args   map[string]any `json:"args,omitempty"`
+	Result string         `json:"result,omitempty"`
+	Status string         `json:"status,omitempty"`
+	Turn   int            `json:"turn,omitempty"`          // progress: current turn
+	Tokens int            `json:"tokens,omitempty"`        // progress: cumulative input tokens
+	Model  string         `json:"model,omitempty"`         // usage: the model that produced this turn
+	InTok  int            `json:"input_tokens,omitempty"`  // usage: input tokens this turn
+	OutTok int            `json:"output_tokens,omitempty"` // usage: output tokens this turn
 }
 
 // EventFunc receives run events.

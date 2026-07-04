@@ -427,7 +427,9 @@ func (m *model) rebuild(keep bool) {
 	if keep && m.session != nil {
 		hist = m.session.History()
 	}
-	orch, err := orchestrator.Build(m.cfg, m.workdir, true, m.mode, m.extraOrch, m.extraExec, m.onEvent)
+	orch, err := orchestrator.Build(m.cfg, m.workdir, orchestrator.Options{
+		Isolate: true, Mode: m.mode, ExtraOrch: m.extraOrch, ExtraExec: m.extraExec, OnEvent: m.onEvent,
+	})
 	m.buildErr = err
 	if err != nil {
 		m.session = nil
