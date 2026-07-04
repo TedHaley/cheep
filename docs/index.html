@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CHEEP! — a multi-agent coding shell you can watch</title>
-<meta name="description" content="cheep squeezes the most out of your AI budget: a smart orchestrator plans and verifies while cheap or local executor agents do the work — with a live token-and-dollar cost dashboard. One static binary, no dependencies.">
+<meta name="description" content="cheep squeezes the most out of your AI budget: a smart orchestrator plans and verifies while cheap or local executor agents do the work — with validation before every merge, a live token-and-dollar dashboard, and a no-mistakes mode where nothing lands without your sign-off. One static binary, no dependencies.">
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
@@ -55,10 +55,15 @@
   ul.feat { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; }
   ul.feat li { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
   ul.feat b { color: var(--fg); }
+  .new { color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .5px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; }
   td code { color: var(--accent); }
+  .demo { margin: 18px 0 26px; }
+  .demo .say { color: var(--muted); margin: 0 0 6px; }
+  .demo pre { margin: 0; }
+  .demo .out { color: var(--muted); }
   .dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
   .dl a {
     display: flex; justify-content: space-between; padding: 12px 14px; text-decoration: none;
@@ -87,6 +92,8 @@
     <div class="badges">
       <a href="https://github.com/TedHaley/cheep">GitHub</a>
       <a href="#install">Install</a>
+      <a href="#showcase">Showcase</a>
+      <a href="portable.html">Use it from your phone</a>
       <a href="https://github.com/TedHaley/cheep/releases/latest">Releases</a>
     </div>
   </header>
@@ -95,9 +102,9 @@
     <h2>What is it?</h2>
     <p><strong>cheep</strong> is a tiny, single-binary, interactive multi-agent coding shell for
     your terminal. A lead <em>orchestrator</em> agent breaks a task into pieces, hands each to one
-    or more <em>executor</em> agents (in parallel), verifies the work, and recovers any executor
-    that gets stuck — loops, runs out of context, or errors out. You watch it happen, with a tab
-    per agent.</p>
+    or more <em>executor</em> agents (in parallel, each in its own isolated git worktree),
+    validates the work <em>before</em> it merges, and recovers any executor that gets stuck —
+    loops, runs out of context, or errors out. You watch it happen, with a tab per agent.</p>
     <p>The whole point: <strong>the best results for the least money.</strong> Spend premium
     tokens only where judgment matters, run the rest on cheap or local models, and watch the
     token-and-dollar meter so you always know what a task actually cost.</p>
@@ -125,17 +132,142 @@
       <li><b>Watch every agent.</b> A tab per agent with live output; see what's delegated to whom and step in any time.</li>
       <li><b>See every dollar.</b> A live counter shows tokens and estimated cost per agent (per-token prices from the maintained LiteLLM dataset), marks local work free, and tallies what you saved versus running it all on a premium model.</li>
       <li><b>Cheap-first escalation.</b> Each subtask runs on a cheap or local model first; only if it fails, loops, or runs out of context does cheep retry on a pricier one — so you pay premium rates only for the work that truly needs them.</li>
-      <li><b>Prompt caching.</b> On Anthropic, the system prompt, tools, and conversation are cached and reused across an agent's turns, so repeated context is billed at a fraction of the price (OpenAI-compatible endpoints cache automatically).</li>
-      <li><b>Per-project budgets.</b> Set a dollar ceiling per project — cheep warns at 80% and stops at 100% — and the orchestrator routes to the cheapest capable executor (cheapest-first, with cost tiers) to stay within it. Cost is bounded, not just visible.</li>
-      <li><b>Modes.</b> <code>shift+tab</code> cycles chat → plan (read-only) → auto (full multi-agent delegation).</li>
-      <li><b>Self-healing.</b> Executors that loop, exhaust their context, or error are detected and recovered automatically.</li>
-      <li><b>Resumable history.</b> Conversations are saved as transcripts; resume any past session with <code>/history</code>.</li>
-      <li><b>Zero-config start.</b> First launch discovers local model servers and API keys on your machine and walks you through setup.</li>
+      <li><b>Validated before it merges.</b> Every delegated subtask runs in a private git worktree; your project's declared checks run and a fresh-context reviewer judges the diff (with bounded automatic fix rounds) <em>before</em> anything touches your checkout. Failed work stays on its branch — never lost.</li>
+      <li><span class="new">NEW</span> <b>No-mistakes mode.</b> <code>/nomistakes on</code>: every shared write and command asks first, and nothing merges until you approve the branch diff. Headless runs hold everything on branches — cheep becomes physically incapable of surprising you.</li>
+      <li><span class="new">NEW</span> <b>Scouts and ships.</b> The orchestrator marks each subtask <em>ship</em> (delivers changes through the merge machinery) or <em>scout</em> (research/audit — changes discarded, findings saved as a report). Research on free local models gets even cheaper.</li>
+      <li><span class="new">NEW</span> <b>Ship straight to PRs.</b> <code>/delivery pr</code> pushes each validated branch and opens a pull request instead of merging locally — safe on shared repos; your checkout is never modified.</li>
+      <li><span class="new">NEW</span> <b>Session tree.</b> <code>/fork</code> branches the conversation from any earlier turn (shared context kept, nothing re-paid); <code>/tree</code> navigates every session with forks nested under parents.</li>
+      <li><span class="new">NEW</span> <b>Reasoning per role.</b> Append <code>:low|:medium|:high</code> to any model name — extended thinking on Claude, <code>reasoning_effort</code> elsewhere. Planner thinks hard, workers stay cheap, in one suffix.</li>
+      <li><span class="new">NEW</span> <b>Pi extensions.</b> Run <a href="https://pi.dev">pi coding agent</a> extensions from npm inside cheep — <code>cheep pi add &lt;pkg&gt;</code> and their tools join your agents' tool set.</li>
+      <li><span class="new">NEW</span> <b>Crash-proof delegation.</b> Every delegation writes a marker while it runs; if cheep dies mid-flight, the next launch tells you exactly what was interrupted and which branch holds the partial work.</li>
+      <li><b>Per-project budgets.</b> Set a dollar ceiling per project — cheep warns at 80% and stops at 100% — and the orchestrator routes to the cheapest capable executor to stay within it. Cost is bounded, not just visible.</li>
       <li><b>Loop until green.</b> An <code>iterate_until</code> primitive re-runs a subtask on a cheap executor and re-runs your check (tests, build, lint) until it passes — bounded by rounds and budget. Loops on cheap models are nearly free, so iterate aggressively.</li>
-      <li><b>Skills.</b> Drop markdown knowledge files in <code>~/.cheep/skills</code>; agents load one on demand (<code>use_skill</code>) instead of bloating every prompt — less context, less cost.</li>
-      <li><b>Tools &amp; MCP.</b> Built-in file/shell tools, plus connect MCP servers (stdio or HTTP) to give every agent more capabilities.</li>
-      <li><b>One static binary.</b> No runtime, no dependencies. <code>brew install</code>, <code>go install</code>, or download.</li>
+      <li><b>Project launchpad.</b> <code>cheep init</code> sets up any repo for agentic work: AGENTS.md with detected build/test/lint checks, lessons that persist corrections, open-standard skills — readable by Claude Code, Codex, and friends too.</li>
+      <li><b>Prompt templates &amp; skills.</b> Markdown templates invoked as <code>/name args</code>; knowledge files agents load on demand instead of bloating every prompt.</li>
+      <li><b>Modes &amp; approvals.</b> <code>shift+tab</code> cycles chat → plan → auto; <code>/approval</code> gates risky calls with diff previews; <code>/stow</code> sweeps lessons and a handoff note to disk before a reset.</li>
+      <li><b>Tools &amp; MCP.</b> Built-in file/shell tools, plus MCP servers (stdio or HTTP) for every agent.</li>
+      <li><b>One static binary.</b> No runtime, no dependencies. <code>brew install</code>, <code>go install</code>, or download. Every feature above is covered by the test suite (<code>go test ./...</code>).</li>
     </ul>
+  </section>
+
+  <section id="showcase">
+    <h2>Showcase — impressive things, and exactly how to run them</h2>
+
+    <div class="demo">
+      <h3>1 · A parallel scout swarm audits your repo for pennies</h3>
+      <p class="say">Scouts investigate in parallel on free local models. Their file changes are
+      discarded automatically; each one's findings come back to the orchestrator and land as a
+      report in <code>~/.cheep/reports/</code>.</p>
+      <pre><code>› audit this repo: dead code, missing error handling, and flaky tests —
+  investigate each area separately and give me one prioritized list
+
+<span class="out"># the orchestrator fans out three kind:"scout" subtasks in ONE delegate call,
+# one tab per scout; reports saved under ~/.cheep/reports/, checkout untouched</span></code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>2 · Fix-until-green, nearly free</h3>
+      <p class="say">Anything with an objective pass/fail signal can be looped on a cheap model.
+      Each failure is fed back in; the loop is bounded by rounds and your budget.</p>
+      <pre><code>/budget 2
+› the tests in ./internal/parser are failing — fix them until `go test ./internal/parser`
+  passes
+
+<span class="out"># orchestrator calls iterate_until{subtask, check:"go test ./internal/parser"}
+# on the cheapest executor; rounds are ~free on a local model, budget caps the worst case</span></code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>3 · No-mistakes mode: nothing lands without your sign-off</h3>
+      <p class="say">Firstmate-style safety. Executors still work in parallel worktrees and
+      validation still runs — but the final merge waits for you, with a scrollable colored diff.
+      Decline and the work stays on its branch.</p>
+      <pre><code>/nomistakes on
+› migrate the config package from JSON to TOML
+
+<span class="out"># … executors work, checks pass, then:
+# ┌ approve: merge → cheep/local-qwen-1  ────────────────┐
+# │ + func LoadTOML(path string) (Config, error) {       │
+# │ - func LoadJSON(path string) (Config, error) {       │
+# │ y/enter: allow · n/esc: deny · ↑/↓: scroll           │
+# └───────────────────────────────────────────────────────┘</span></code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>4 · Ship pull requests, not merges</h3>
+      <p class="say">On a shared repo, don't touch the checkout at all — every validated subtask
+      branch is pushed and opened as a PR (needs a git remote and the <code>gh</code> CLI).</p>
+      <pre><code>/delivery pr
+› split the User struct into Identity and Profile, update all call sites
+
+<span class="out"># result: "pull request opened" + URL per subtask — review on GitHub as usual</span></code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>5 · Fork the conversation, race two approaches</h3>
+      <p class="say">Tried something and want to compare it against another approach — without
+      re-paying for all the context the session already built up? Fork it.</p>
+      <pre><code>/fork          <span class="out"># pick the turn to redo; history before it is kept</span>
+› actually, implement it with a worker pool instead of one goroutine per job
+/tree          <span class="out"># both attempts live side by side; switch any time</span></code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>6 · A planner that thinks hard, workers that don't</h3>
+      <p class="say">Reasoning effort is a per-role suffix. Extended thinking on the Claude
+      planner; workers stay fast and cheap. (Ollama tags like <code>qwen3:8b</code> are left
+      alone.)</p>
+      <pre><code>{
+  "orchestrator": { "provider": "anthropic", "model": "claude-sonnet-4-6:high" },
+  "executors": [
+    { "name": "local-qwen", "provider": "openai",
+      "endpoint": "http://127.0.0.1:1234/v1", "model": "qwen/qwen3.6-35b-a3b" }
+  ]
+}</code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>7 · Borrow pi's ecosystem</h3>
+      <p class="say">Extensions published for the <a href="https://pi.dev">pi coding agent</a>
+      run inside cheep: a bundled Node bridge loads them (TypeScript included) and serves the
+      tools they register to every agent. Review third-party code before installing.</p>
+      <pre><code>cheep pi add pi-web-access     <span class="out"># web search / fetch tools, from npm</span>
+cheep                          <span class="out"># next start: mcp "pi": N tool(s)</span>
+› research the top 3 Go HTML sanitizer libraries and recommend one
+
+<span class="out"># the orchestrator delegates research to a cheap executor,
+# which now has pi__web_search &amp; friends</span></code></pre>
+    </div>
+
+    <div class="demo">
+      <h3>8 · Walk away mid-task. Come back on your phone.</h3>
+      <p class="say">Run cheep inside tmux, and the same live session — running task, tabs,
+      cost meter — is reachable from your phone over Tailscale SSH. If anything ever dies
+      mid-delegation, the next launch says exactly what was interrupted and where the partial
+      work lives.</p>
+      <pre><code>tmux new -As cheep && cheep    <span class="out"># on your Mac</span>
+› refactor the storage layer; run the full test suite when done
+<span class="out"># … later, from your phone:</span>
+ssh my-macbook -t 'tmux attach -t cheep'</code></pre>
+      <p class="say">Full setup (Tailscale, mosh, phone keyboards): <a href="portable.html">the
+      portable guide</a>. Before you step away, <code>/stow</code> writes lessons and a
+      done / in-flight / next-steps note to disk.</p>
+    </div>
+
+    <div class="demo">
+      <h3>9 · Your own slash commands in 20 seconds</h3>
+      <p class="say">A markdown file is a command. <code>$1..$9</code> and
+      <code>$ARGUMENTS</code> substitute; project templates shadow global ones.</p>
+      <pre><code>$ cat .cheep/prompts/review.md
+---
+description: fresh-context review of a package
+---
+Review the $1 package for correctness and API design.
+Focus on: $ARGUMENTS
+
+<span class="out"># in the shell (it autocompletes like a built-in):</span>
+/review internal/worktree locking and crash-safety</code></pre>
+    </div>
   </section>
 
   <section>
@@ -155,12 +287,13 @@
         <div class="who">Right model for the job</div>
         Send code to a coding-tuned model, research or drafts to a fast general one, big files to
         a long-context one. The orchestrator sees each executor's cost tier and your project
-        budget, and routes cheapest-capable-first — escalating only when needed.
+        budget, and routes cheapest-capable-first — escalating only when needed. Steer it with
+        natural-language rules in <code>.cheep/dispatch.json</code>.
       </div>
       <div class="card cheap">
         <div class="who">All local, zero cost</div>
         Point every role at local models for private, offline work that costs nothing — you still
-        get planning, parallelism, and verification on top.
+        get planning, parallelism, validation, and verification on top.
       </div>
       <div class="card smart">
         <div class="who">Spend where it counts</div>
@@ -170,13 +303,13 @@
     </div>
 
     <h3>Example: one planner, two specialists</h3>
-    <p>A Claude orchestrator plans and verifies; a free local Qwen does the heavy lifting; a
-    cloud DeepSeek handles anything that needs a bit more horsepower. This is just
+    <p>A Claude orchestrator plans and verifies (thinking hard); a free local Qwen does the heavy
+    lifting; a cloud DeepSeek handles anything that needs a bit more horsepower. This is just
     <code>~/.cheep/config.json</code> — but you'd normally build it in the configurator:</p>
     <pre><code>{
   "orchestrator": {
     "provider": "anthropic",
-    "model": "claude-sonnet-4-6"
+    "model": "claude-sonnet-4-6:high"
   },
   "executors": [
     {
@@ -232,29 +365,42 @@ cheep</code></pre>
     running model servers and API keys, and you pick an <strong>orchestrator</strong> and at least
     one <strong>executor</strong> — or enter cloud credentials manually (Anthropic, OpenAI, Grok,
     DeepSeek, …). Then you're in the shell. Reopen it any time with <code>/config</code>.</p>
-    <p>Prefer one-shot, non-interactive runs?</p>
-    <pre><code>cheep run "add a /health endpoint and a test for it" --workdir .</code></pre>
+    <p>Setting up a project for agentic work? <code>cheep init</code> scaffolds AGENTS.md with
+    detected validation checks. Prefer one-shot, non-interactive runs?</p>
+    <pre><code>cheep run "add a /health endpoint and a test for it" --workdir .   # add --json for CI</code></pre>
   </section>
 
   <section>
-    <h2>Configuration</h2>
+    <h2>Commands</h2>
     <p>There are no required environment variables. cheep stores its setup in
     <code>~/.cheep/config.json</code> and API keys in <code>~/.cheep/keys.env</code> (0600). You
     configure agents interactively, not by hand.</p>
     <table>
       <tr><th>Command</th><th>What it does</th></tr>
       <tr><td><code>cheep</code></td><td>Interactive shell (opens setup on first run)</td></tr>
-      <tr><td><code>/config</code></td><td>In-app configurator: discover local servers + keys, or enter cloud credentials</td></tr>
-      <tr><td><code>/history</code></td><td>Browse and resume past conversations</td></tr>
-      <tr><td><code>cheep run "&lt;task&gt;"</code></td><td>Run a single task non-interactively</td></tr>
+      <tr><td><code>cheep run "&lt;task&gt;" [--json]</code></td><td>Run a single task non-interactively (JSONL events for CI)</td></tr>
+      <tr><td><code>cheep init</code></td><td>Set up a project: AGENTS.md, detected checks, toolbelt skill</td></tr>
+      <tr><td><code>cheep validate [--review]</code></td><td>Run the project's checks (+ optional AI review of the diff)</td></tr>
+      <tr><td><code>cheep worktree …</code></td><td>Pooled, artifact-warm git worktrees (usable from other harnesses)</td></tr>
+      <tr><td><code>cheep pi add &lt;pkg&gt;</code></td><td>Install a pi.dev extension; its tools join every agent</td></tr>
       <tr><td><code>cheep check</code></td><td>Ping the orchestrator and every executor</td></tr>
-      <tr><td><code>cheep keys</code></td><td>Show the key store</td></tr>
+    </table>
+    <h3>In the shell</h3>
+    <table>
+      <tr><th>Slash command</th><th>What it does</th></tr>
+      <tr><td><code>/config</code> · <code>/setup</code></td><td>Discovery configurator · configure by chatting</td></tr>
+      <tr><td><code>/history</code> · <code>/fork</code> · <code>/tree</code></td><td>Resume sessions · branch from an earlier turn · navigate the session tree</td></tr>
+      <tr><td><code>/nomistakes</code> · <code>/approval</code></td><td>Nothing lands without your sign-off · gate risky calls (yolo/auto/approve)</td></tr>
+      <tr><td><code>/delivery merge|pr</code></td><td>Merge validated work locally, or push branches and open PRs</td></tr>
+      <tr><td><code>/budget</code> · <code>/tokens</code></td><td>Cap spend per project · live tokens + $ per model (and savings)</td></tr>
+      <tr><td><code>/prompts</code> · <code>/stow</code></td><td>List <code>/name</code> templates · sweep lessons + handoff note to disk</td></tr>
     </table>
   </section>
 
   <footer>
     Single static binary · zero runtime dependencies · MIT licensed<br>
-    <a href="https://github.com/TedHaley/cheep">github.com/TedHaley/cheep</a>
+    <a href="https://github.com/TedHaley/cheep">github.com/TedHaley/cheep</a> ·
+    <a href="portable.html">use cheep from your phone</a>
   </footer>
 
 </div>
