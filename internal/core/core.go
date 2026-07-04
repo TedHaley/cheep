@@ -22,6 +22,19 @@ type Message struct {
 	ToolCalls  []ToolCall // assistant only
 	ToolCallID string     // tool role only
 	Name       string     // tool name, for the tool role
+
+	// Thinking holds Anthropic extended-thinking blocks (assistant only). The
+	// API requires them replayed verbatim on tool-use turns, so they are
+	// preserved here and echoed back by the Anthropic provider.
+	Thinking []ThinkingBlock
+}
+
+// ThinkingBlock is one extended-thinking content block, kept opaque.
+type ThinkingBlock struct {
+	Type      string `json:"type"` // "thinking" | "redacted_thinking"
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"` // redacted_thinking payload
 }
 
 // Turn is one assistant response plus its usage accounting.

@@ -42,6 +42,16 @@ func (a *Anthropic) toNative(messages []core.Message) []anthMessage {
 			out = append(out, anthMessage{Role: "user", Content: m.Text})
 		case "assistant":
 			var content []map[string]any
+			for _, tb := range m.Thinking {
+				switch tb.Type {
+				case "thinking":
+					content = append(content, map[string]any{
+						"type": "thinking", "thinking": tb.Thinking, "signature": tb.Signature,
+					})
+				case "redacted_thinking":
+					content = append(content, map[string]any{"type": "redacted_thinking", "data": tb.Data})
+				}
+			}
 			if m.Text != "" {
 				content = append(content, map[string]any{"type": "text", "text": m.Text})
 			}
@@ -90,7 +100,21 @@ func markLastCacheable(msgs []anthMessage) {
 	}
 }
 
+// thinkingBudget maps a reasoning level to an extended-thinking token budget.
+func thinkingBudget(level string) int {
+	switch level {
+	case "low":
+		return 2048
+	case "medium":
+		return 8192
+	case "high":
+		return 16384
+	}
+	return 0
+}
+
 func (a *Anthropic) Complete(ctx context.Context, model, system string, messages []core.Message, tools []core.Tool) (core.Turn, error) {
+	model, level := core.SplitThinking(model)
 	var nativeTools []map[string]any
 	for _, t := range tools {
 		nativeTools = append(nativeTools, map[string]any{
@@ -106,6 +130,12 @@ func (a *Anthropic) Complete(ctx context.Context, model, system string, messages
 		"model":      model,
 		"max_tokens": a.MaxTokens,
 		"messages":   native,
+	}
+	// A ":low|:medium|:high" model suffix turns on extended thinking with a
+	// matching budget; max_tokens must exceed it, so grow it by the budget.
+	if budget := thinkingBudget(level); budget > 0 {
+		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": budget}
+		body["max_tokens"] = a.MaxTokens + budget
 	}
 	if system != "" {
 		body["system"] = []map[string]any{{"type": "text", "text": system, "cache_control": ephemeral}}
@@ -139,11 +169,14 @@ func (a *Anthropic) Complete(ctx context.Context, model, system string, messages
 
 	var parsed struct {
 		Content []struct {
-			Type  string         `json:"type"`
-			Text  string         `json:"text"`
-			ID    string         `json:"id"`
-			Name  string         `json:"name"`
-			Input map[string]any `json:"input"`
+			Type      string         `json:"type"`
+			Text      string         `json:"text"`
+			ID        string         `json:"id"`
+			Name      string         `json:"name"`
+			Input     map[string]any `json:"input"`
+			Thinking  string         `json:"thinking"`
+			Signature string         `json:"signature"`
+			Data      string         `json:"data"`
 		} `json:"content"`
 		Usage struct {
 			InputTokens         int `json:"input_tokens"`
@@ -164,6 +197,11 @@ func (a *Anthropic) Complete(ctx context.Context, model, system string, messages
 		case "tool_use":
 			msg.ToolCalls = append(msg.ToolCalls,
 				core.ToolCall{ID: b.ID, Name: b.Name, Arguments: b.Input})
+		case "thinking":
+			msg.Thinking = append(msg.Thinking,
+				core.ThinkingBlock{Type: "thinking", Thinking: b.Thinking, Signature: b.Signature})
+		case "redacted_thinking":
+			msg.Thinking = append(msg.Thinking, core.ThinkingBlock{Type: "redacted_thinking", Data: b.Data})
 		}
 	}
 	// Count fresh input + cache writes as input tokens (writes are ~full price);
