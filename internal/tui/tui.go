@@ -51,6 +51,13 @@ type switchMsg struct {
 	err string
 }
 
+
+type cmdResultMsg struct {
+	cmd    string
+	stdout string
+	stderr string
+	exit   int
+}
 type tab struct {
 	id     string // agent name: "orchestrator" / "qwen-local#2"
 	title  string
@@ -137,6 +144,7 @@ var (
 	userSt      = lipgloss.NewStyle().Bold(true)
 	todoDoneSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	sepSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("238")) // dim gray for separator
 )
 
 // renderMarkdown renders assistant text as styled markdown, bulleted on line 1.
@@ -229,6 +237,19 @@ func todoHeaderLines(todos []todoItem) []string {
 		default:
 			out = append(out, "  ○ "+t.title)
 		}
+	}
+	return out
+}
+
+
+// queueHeaderLines renders the queued messages as a sticky header.
+func queueHeaderLines(queued []string) []string {
+	if len(queued) == 0 {
+		return nil
+	}
+	out := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")).Render("Queued Tasks")}
+	for i, q := range queued {
+		out = append(out, "  "+hintSt.Render(fmt.Sprintf("%d. %s", i+1, short(q, 100))))
 	}
 	return out
 }
@@ -481,6 +502,33 @@ func probeCmd(cfg config.Config) tea.Cmd {
 	}
 }
 
+
+// bashCmd runs a shell command and returns the result as a cmdResultMsg.
+func bashCmd(cmdStr string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		var stdout, stderr strings.Builder
+		c.Stdout = &stdout
+		c.Stderr = &stderr
+		err := c.Run()
+		exit := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exit = exitErr.ExitCode()
+			} else {
+				exit = 1
+			}
+		}
+		return cmdResultMsg{
+			cmd:    cmdStr,
+			stdout: strings.TrimSpace(stdout.String()),
+			stderr: strings.TrimSpace(stderr.String()),
+			exit:   exit,
+		}
+	}
+}
 // relayout sizes the input to its content (1–6 lines) and gives the rest to the log.
 func (m *model) relayout() {
 	lines := strings.Count(m.input.Value(), "\n") + 1
@@ -494,7 +542,18 @@ func (m *model) relayout() {
 	m.input.CursorEnd()
 	header := 0
 	if len(m.tabs) > 0 {
-		header = len(todoHeaderLines(m.tabs[m.active].todos))
+		// Account for todos
+		todoLines := todoHeaderLines(m.tabs[m.active].todos)
+		if len(todoLines) > 0 {
+			header += len(todoLines)
+		}
+		// Account for queue header
+		if m.running && len(m.queue) > 0 {
+			queueLines := queueHeaderLines(m.queue)
+			if len(queueLines) > 0 {
+				header += len(queueLines)
+			}
+		}
 	}
 	m.vp.Height = max(3, m.h-4-lines-header) // tab bar + rule + rule + hint = 4
 }
@@ -579,6 +638,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+
+	case cmdResultMsg:
+		m.running = false
+		if msg.exit == 0 {
+			m.tabs[0].status = "ok"
+			m.footer = "command exited 0"
+		} else {
+			m.tabs[0].status = "err"
+			m.footer = "command exited " + strconv.Itoa(msg.exit)
+		}
+		(&m).appendLine(0, hintSt.Render("stdout:"))
+		if msg.stdout != "" {
+			for _, l := range strings.Split(msg.stdout, "\n") {
+				(&m).appendLine(0, "  "+l)
+			}
+		}
+		if msg.stderr != "" {
+			(&m).appendLine(0, errSt.Render("stderr:"))
+			for _, l := range strings.Split(msg.stderr, "\n") {
+				(&m).appendLine(0, "  "+l)
+			}
+		}
+		m.active = 0
+		m.follow = true
+		(&m).syncViewport()
+		return m, nil
 	case switchMsg:
 		if msg.ok {
 			m.cfg = msg.cfg
@@ -741,6 +826,21 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	(&m).relayout()
 	if strings.HasPrefix(text, "/") {
 		return m.slash(text)
+	}
+	// Handle !<command> for inline shell execution (Claude Code style)
+	if strings.HasPrefix(text, "!") {
+		cmdStr := strings.TrimSpace(strings.TrimPrefix(text, "!"))
+		if cmdStr == "" {
+			m.footer = "usage: !<command>"
+			return m, nil
+		}
+		(&m).appendLine(0, hintSt.Render("🔧 "+cmdStr))
+		m.running = true
+		m.tabs[0].status = "run"
+		m.active = 0
+		m.follow = true
+		m.started = time.Now()
+		return m, tea.Batch(m.sp.Tick, bashCmd(cmdStr))
 	}
 	if m.session == nil {
 		// Show the message and a clear, actionable error in the conversation.
@@ -1032,6 +1132,9 @@ func (m *model) applyEvent(e core.Event) {
 		}
 	case "text":
 		if strings.TrimSpace(e.Text) != "" {
+
+		// Add a visual separator between user input and assistant response
+		m.appendLine(idx, sepSt.Render(strings.Repeat("─", max(1, m.w-2))))
 			for _, l := range renderMarkdown(e.Text, m.w) {
 				m.appendLine(idx, l)
 			}
@@ -1128,6 +1231,13 @@ func (m model) View() string {
 	parts := []string{m.tabBar(), m.vp.View()}
 	if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
 		parts = append(parts, strings.Join(todos, "\n"))
+	}
+	// Show queued tasks below todos when running
+	if m.running && len(m.queue) > 0 {
+		queueLines := queueHeaderLines(m.queue)
+		if len(queueLines) > 0 {
+			parts = append(parts, strings.Join(queueLines, "\n"))
+		}
 	}
 	parts = append(parts, rule, m.input.View(), rule, hint)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
