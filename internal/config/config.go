@@ -61,6 +61,28 @@ type Config struct {
 	// Budgets caps spend per project, keyed by absolute working directory. A
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
+
+	// Validation configures the pre-merge pipeline run on each delegated
+	// subtask's worktree (checks from AGENTS.md '## Validation', then a
+	// fresh-context review). Zero value = enabled with defaults.
+	Validation Validation `json:"validation,omitempty"`
+
+	// Reviewer optionally overrides which model reviews branch diffs during
+	// validation; nil uses the orchestrator's provider/model.
+	Reviewer *Agent `json:"reviewer,omitempty"`
+}
+
+// Validation configures the pre-merge validation pipeline.
+type Validation struct {
+	// Disable skips the whole pipeline (pre-validation behavior).
+	Disable bool `json:"disable,omitempty"`
+	// MaxFixRounds bounds repair loops per subtask (default 2).
+	MaxFixRounds int `json:"max_fix_rounds,omitempty"`
+	// SkipReview keeps the checks but drops the reviewer agent (cheaper).
+	SkipReview bool `json:"skip_review,omitempty"`
+	// Strict makes reviewer failures (unparseable verdict, errors) block the
+	// merge instead of falling open.
+	Strict bool `json:"strict,omitempty"`
 }
 
 // Budget resolves the active budget for a working directory: the per-project

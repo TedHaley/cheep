@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -22,8 +23,10 @@ import (
 	"github.com/TedHaley/cheep/internal/mcp"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/pricing"
+	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tui"
+	"github.com/TedHaley/cheep/internal/validate"
 	"github.com/TedHaley/cheep/internal/worktree"
 
 	"golang.org/x/term"
@@ -71,6 +74,8 @@ func main() {
 		cmdKeys()
 	case "worktree":
 		cmdWorktree(os.Args[2:])
+	case "validate":
+		cmdValidate(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("cheep %s\n", version)
 	case "-h", "--help", "help":
@@ -92,6 +97,10 @@ Usage:
   cheep config [show|path]       set up or inspect your agents (manual wizard)
   cheep setup                    configure agents by chatting with a working one
   cheep keys                     show the key store (~/.cheep/keys.env)
+  cheep validate [--review] [--json]
+                                 run the project's AGENTS.md '## Validation'
+                                 checks (and optionally a fresh-context AI
+                                 review of the branch diff); exits 0 on pass
   cheep worktree <acquire|release|list> [--json]
                                  manage the pooled git worktrees (toolbelt for
                                  other harnesses; cheep uses the pool itself)
@@ -541,6 +550,97 @@ func cmdRun(argv []string) {
 	r := orch.Run(task)
 	fmt.Println("──────────── done ────────────")
 	fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+}
+
+// ---- validate ---------------------------------------------------------------
+
+// cmdValidate runs the validation pipeline headlessly against the current
+// directory: the AGENTS.md '## Validation' checks, plus (with --review) the
+// same fresh-context reviewer cheep uses before merging subtask worktrees.
+// Exit codes: 0 pass, 1 fail, 2 usage/config error. Other harnesses shell out
+// to this — keep the --json shape stable.
+func cmdValidate(argv []string) {
+	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+	dir := fs.String("dir", ".", "directory to validate")
+	review := fs.Bool("review", false, "also run a fresh-context AI review of the diff against --base")
+	base := fs.String("base", "", "ref to diff against for --review (default: merge-base with the default branch)")
+	asJSON := fs.Bool("json", false, "machine-readable result")
+	_ = fs.Parse(argv)
+
+	proj := project.Load(*dir)
+	if len(proj.Checks) == 0 && !*review {
+		fmt.Fprintln(os.Stderr, "cheep: no checks declared — add a '## Validation' section to AGENTS.md (see cheep init)")
+		os.Exit(2)
+	}
+
+	runner := validate.Runner{Checks: proj.Checks}
+	baseRef := *base
+	if *review {
+		cfg := ensureConfig()
+		runner.Reviewer = orchestrator.NewReviewer(cfg, printer())
+		runner.Strict = cfg.Validation.Strict
+		if runner.Reviewer == nil {
+			fmt.Fprintln(os.Stderr, "cheep: no usable reviewer model configured")
+			os.Exit(2)
+		}
+		if baseRef == "" {
+			baseRef = defaultBase(*dir)
+			if baseRef == "" {
+				fmt.Fprintln(os.Stderr, "cheep: cannot determine a base ref for --review; pass --base")
+				os.Exit(2)
+			}
+		}
+	}
+	if !*asJSON {
+		runner.OnEvent = printer()
+	}
+
+	res := runner.Run(context.Background(), *dir, baseRef)
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+	} else {
+		for _, c := range res.Checks {
+			mark := "✓"
+			if c.Exit != 0 {
+				mark = "✗"
+			}
+			fmt.Printf("%s %s (exit %d)\n", mark, c.Name, c.Exit)
+		}
+		if res.Review != nil {
+			fmt.Printf("review: %s %s\n", res.Review.Verdict, res.Review.Summary)
+			for _, i := range res.Review.Issues {
+				fmt.Printf("  - [%s] %s %s\n", i.Severity, i.Description, i.File)
+			}
+		}
+		if res.Note != "" {
+			fmt.Println("note:", res.Note)
+		}
+	}
+	if !res.Passed {
+		os.Exit(1)
+	}
+}
+
+// defaultBase finds the merge-base of HEAD with the repo's default branch
+// (origin/HEAD, falling back to main/master), or "" when none applies.
+func defaultBase(dir string) string {
+	try := func(args ...string) string {
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	for _, ref := range []string{try("symbolic-ref", "--short", "refs/remotes/origin/HEAD"), "main", "master"} {
+		if ref == "" {
+			continue
+		}
+		if mb := try("merge-base", "HEAD", ref); mb != "" {
+			return mb
+		}
+	}
+	return ""
 }
 
 // ---- worktree ---------------------------------------------------------------

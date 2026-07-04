@@ -48,6 +48,23 @@ func Dir() (string, error) {
 // NewID returns a sortable id from a timestamp (UTC, second precision).
 func NewID(t time.Time) string { return t.UTC().Format("20060102-150405") }
 
+// AppendRunNote appends a timestamped markdown note to ~/.cheep/history/notes.md
+// — the "read in the morning" trail of what delegated batches did and how
+// validation went. Failures are silent: notes must never break a run.
+func AppendRunNote(workdir, md string) {
+	d, err := Dir()
+	if err != nil || os.MkdirAll(d, 0o700) != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(d, "notes.md"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	stamp := time.Now().Format("2006-01-02 15:04")
+	f.WriteString("\n## " + stamp + " — " + workdir + "\n\n" + strings.TrimSpace(md) + "\n")
+}
+
 // Save writes the JSON record and the Markdown transcript.
 func Save(r Record) error {
 	if len(r.Messages) == 0 {

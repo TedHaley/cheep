@@ -20,13 +20,55 @@ import (
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/skills"
 	"github.com/TedHaley/cheep/internal/tool"
+	"github.com/TedHaley/cheep/internal/validate"
 	"github.com/TedHaley/cheep/internal/worktree"
 )
+
+const reviewerSystem = `You are a fresh-context code reviewer. You did not write these changes
+and have no stake in them. Judge the unified diff below on correctness, safety, and fit with
+the project's stated conventions; use your read-only tools (read_file, list_dir) to check
+surrounding code when the diff alone is ambiguous. Do not request stylistic rewrites of
+working code. Be decisive.
+
+End your reply with EXACTLY ONE JSON object and nothing after it:
+{"verdict":"approve"} or
+{"verdict":"revise","summary":"<one line>","issues":[{"severity":"high|medium|low","file":"<path>","description":"<what and why>"}]}
+Only "revise" for issues that matter (bugs, broken behavior, unmet requirements, convention
+violations declared in the project instructions) — not preferences.`
+
+// NewReviewer builds the fresh-context review callback used by the validation
+// pipeline: a new session per call (no bias from the implementing agent),
+// read-only tools confined to the worktree, judging the branch diff. Exported
+// so `cheep validate --review` shares the exact same reviewer.
+func NewReviewer(cfg config.Config, onEvent core.EventFunc) func(ctx context.Context, diff, dir string) (validate.Verdict, error) {
+	ra := cfg.Orchestrator
+	if cfg.Reviewer != nil {
+		ra = *cfg.Reviewer
+	}
+	if !usable(ra) {
+		return nil
+	}
+	prov := provider.For(ra.Provider, ra.Endpoint, ra.APIKey, 4096)
+	maxTurns := ra.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 15
+	}
+	return func(ctx context.Context, diff, dir string) (validate.Verdict, error) {
+		sess := agent.New("reviewer", prov, ra.Model, reviewerSystem+project.InstructionsBlock(dir),
+			tool.MakeReadOnly(dir), maxTurns, 0, onEvent).NewSession()
+		r := sess.SendCtx(ctx, "Review this diff:\n\n```diff\n"+diff+"\n```")
+		if r.Status != "completed" {
+			return validate.Verdict{}, fmt.Errorf("reviewer ended with status %s", r.Status)
+		}
+		return validate.ExtractVerdict(r.Output)
+	}
+}
 
 const executorSystem = `You are an executor agent: a focused, capable coding/execution worker.
 You receive one concrete subtask and complete it using your tools (read_file, write_file,
@@ -312,6 +354,49 @@ func iterRes(status string, rounds int, exName, check, out, note string) string 
 	return string(b)
 }
 
+// batchNote renders one delegate batch as a run-notes entry.
+func batchNote(subtasks []string, results []map[string]any) string {
+	var b strings.Builder
+	for i, r := range results {
+		if r == nil {
+			continue
+		}
+		sub := ""
+		if i < len(subtasks) {
+			sub = clip(strings.ReplaceAll(strings.TrimSpace(subtasks[i]), "\n", " "), 140)
+		}
+		fmt.Fprintf(&b, "- **%v** (%v): %s\n", r["status"], r["executor"], sub)
+		if integ, ok := r["integration"].(string); ok && integ != "" {
+			fmt.Fprintf(&b, "  - integration: %s\n", integ)
+		}
+		if v, ok := r["validation"].(validate.Result); ok {
+			state := "failed"
+			if v.Passed {
+				state = "passed"
+			}
+			fmt.Fprintf(&b, "  - validation: %s (%d checks, %d fix rounds)\n", state, len(v.Checks), v.Rounds)
+			if v.Review != nil && v.Review.Summary != "" {
+				fmt.Fprintf(&b, "  - review: %s — %s\n", v.Review.Verdict, v.Review.Summary)
+			}
+		}
+		if esc, ok := r["escalation"].(string); ok && esc != "" {
+			fmt.Fprintf(&b, "  - escalation: %s\n", esc)
+		}
+	}
+	return b.String()
+}
+
+// slimValidation drops passing checks' outputs from a delegate result so the
+// orchestrator's context only carries the interesting parts.
+func slimValidation(v validate.Result) validate.Result {
+	for i := range v.Checks {
+		if v.Checks[i].Exit == 0 {
+			v.Checks[i].Output = ""
+		}
+	}
+	return v
+}
+
 // lessonHint teaches the agent to persist corrections via record_lesson.
 const lessonHint = "\n\nLessons: when the user corrects you about how this project works (a " +
 	"convention, a command, a gotcha), call record_lesson with one concise sentence so the " +
@@ -457,6 +542,14 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			return
 		}
 		t.Remove(!landed)
+	}
+
+	// Pre-merge validation: project checks + fresh-context review, with
+	// bounded fix rounds, all inside the subtask's private worktree.
+	validationOn := !cfg.Validation.Disable
+	var reviewerFn func(context.Context, string, string) (validate.Verdict, error)
+	if validationOn && !cfg.Validation.SkipReview {
+		reviewerFn = NewReviewer(cfg, onEvent)
 	}
 
 	// Cheap-first escalation: order executors by cost so a failed subtask can be
@@ -639,6 +732,37 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 				if tree != nil {
 					gitMu.Lock()
 					committed, cErr := tree.CommitAll("cheep: " + rt.name + " subtask")
+					gitMu.Unlock()
+
+					passed := true
+					if cErr == nil && committed && validationOn {
+						// Checks, review, and fix rounds run OUTSIDE gitMu:
+						// they only touch this subtask's private worktree, and
+						// long test runs must not serialize the other subtasks.
+						fix := func(fctx context.Context, dir, task string) error {
+							fr, _, _ := runJob(fctx, dir, task, j.executor, id)
+							if fr.Status != "completed" {
+								return fmt.Errorf("fix attempt ended with status %s", fr.Status)
+							}
+							gitMu.Lock()
+							_, err := tree.CommitAll("cheep: validation fix (" + rt.name + ")")
+							gitMu.Unlock()
+							return err
+						}
+						runner := validate.Runner{
+							Checks:    project.Load(workdir).Checks,
+							MaxRounds: cfg.Validation.MaxFixRounds,
+							Strict:    cfg.Validation.Strict,
+							Reviewer:  reviewerFn,
+							Fix:       fix,
+							OnEvent:   onEvent,
+						}
+						vres := runner.Run(ctx, tree.Path, tree.Base)
+						passed = vres.Passed
+						res["validation"] = slimValidation(vres)
+					}
+
+					gitMu.Lock()
 					switch {
 					case cErr != nil:
 						res["integration"] = "commit failed: " + cErr.Error()
@@ -646,6 +770,9 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 					case !committed:
 						res["integration"] = "no file changes"
 						release(tree, true)
+					case !passed:
+						res["integration"] = "failed validation (work kept on branch " + tree.Branch + ")"
+						release(tree, false)
 					default:
 						if mErr := tree.MergeInto(); mErr != nil {
 							res["integration"] = mErr.Error() + " (kept on branch " + tree.Branch + ")"
@@ -662,6 +789,11 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			}(i, j)
 		}
 		wg.Wait()
+		subs := make([]string, len(jobs))
+		for i, j := range jobs {
+			subs[i] = j.subtask
+		}
+		history.AppendRunNote(workdir, batchNote(subs, results))
 		out, _ := json.MarshalIndent(results, "", "  ")
 		return string(out)
 	}
@@ -704,6 +836,14 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +
 			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
 			"follow-up subtask (or resolve it yourself with git) before continuing."
+		if validationOn {
+			system += "\n\nValidation is ON: before any merge, the project's declared checks run in the " +
+				"subtask's worktree and a fresh-context reviewer judges the diff, with bounded automatic " +
+				"fix rounds. A result whose \"integration\" says \"failed validation\" kept its work on " +
+				"the named branch — read its \"validation\" field, decide whether the finding is real, " +
+				"and either delegate a targeted fix on that branch or report the finding to the user. " +
+				"Never re-delegate the whole subtask from scratch when a branch already holds the work."
+		}
 	}
 	skillTools := skills.Tools(workdir)
 	system += skillHint(skillTools) + lessonHint + projBlock
