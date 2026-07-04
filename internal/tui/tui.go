@@ -103,6 +103,7 @@ type model struct {
 
 	openTodos    int  // non-done todos from the orchestrator's latest update_todos
 	delegated    bool // did the orchestrator call delegate this run?
+	stowing      bool // current run is a /stow; capture its reply as a run note
 	nudges       int  // auto-continue count since the last user message
 	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
 	budgetWarned bool // already warned at 80% of the budget cap this session
@@ -623,6 +624,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.running = false
 		m.cancel = nil
 		m.quitArmed = false
+		if m.stowing {
+			// /stow finished: its report becomes a durable run note; lessons
+			// were recorded by the agent via record_lesson during the turn.
+			m.stowing = false
+			if msg.r.Status == "completed" && strings.TrimSpace(msg.r.Output) != "" {
+				history.AppendRunNote(m.workdir, "**Stowed session "+m.histID+"**\n\n"+msg.r.Output)
+			}
+			(&m).saveHistory()
+			m.tabs[0].status = statusKey(msg.r.Status)
+			m.footer = "stowed — note in ~/.cheep/history/notes.md · /clear for a fresh start"
+			(&m).syncViewport()
+			return m, tea.SetWindowTitle("cheep ✓ stowed — " + filepath.Base(m.workdir))
+		}
 		// A finished/cancelled run can leave queued approvals nobody is
 		// waiting on (the gated calls unblocked via ctx.Done). Drop them.
 		if len(m.approvals) > 0 {
@@ -997,6 +1011,22 @@ func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 		tea.SetWindowTitle("cheep ● working — "+filepath.Base(m.workdir)))
 }
 
+// stowPrompt sweeps session knowledge to disk before a reset (firstmate's
+// /stow): durable lessons via record_lesson, plus a structured handoff report
+// that cheep appends to the run notes.
+const stowPrompt = `Stow this session before a context reset. Do these now:
+1. For each durable lesson learned this session about how THIS project works (a convention,
+   a command, a gotcha the user corrected), call record_lesson once with one concise
+   sentence. Skip trivia. If record_lesson is unavailable, fold the lessons into the report.
+2. Then reply with a stow report in EXACTLY this structure:
+## Done
+- what was accomplished and verified
+## In flight
+- anything unfinished and where it stands (branches, failing checks, open questions)
+## Next steps
+- the concrete actions a fresh session should take first
+Keep it terse and factual — it is the handoff for a session with no memory of this one.`
+
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	switch strings.Fields(text)[0] {
 	case "/exit", "/quit", "/q":
@@ -1048,6 +1078,17 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m.openFork()
 	case "/tree":
 		return m.openTree()
+	case "/stow":
+		if m.session == nil || len(m.session.History()) == 0 {
+			m.footer = "nothing to stow yet"
+			return m, nil
+		}
+		if m.running {
+			m.footer = "a task is running — stow when it finishes"
+			return m, nil
+		}
+		m.stowing = true
+		return m.sendUser(stowPrompt, hintSt.Render("⚓ stowing session knowledge to disk"))
 	case "/approval", "/approvals":
 		arg := ""
 		if f := strings.Fields(text); len(f) > 1 {

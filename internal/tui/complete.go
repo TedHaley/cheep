@@ -36,6 +36,7 @@ var slashCmds = []slashCmd{
 	{"/tree", "show the session tree (forks nested)"},
 	{"/keeptabs", "toggle auto-close of finished executor tabs"},
 	{"/close", "close the focused executor tab"},
+	{"/stow", "sweep lessons + handoff note to disk before a reset"},
 	{"/clear", "reset the conversation"},
 	{"/prompts", "list prompt templates (invoke as /name)"},
 	{"/help", "show help"},
