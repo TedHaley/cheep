@@ -21,6 +21,7 @@ import (
 	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/pricing"
+	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/skills"
 	"github.com/TedHaley/cheep/internal/tool"
@@ -151,11 +152,18 @@ type execRuntime struct {
 	maxResumes int
 	extra      []core.Tool
 	onEvent    core.EventFunc
+	projectFn  func() string // project instructions, re-read per session
 }
 
 func (e execRuntime) newSession(workdir, label string) *agent.Session {
 	tools := append(tool.Make(workdir, true), e.extra...)
-	return agent.New(label, e.provider, e.model, executorSystem,
+	system := executorSystem
+	if e.projectFn != nil {
+		// Read from the repo root (not the worktree copy) so uncommitted
+		// AGENTS.md edits and freshly recorded lessons reach new sessions.
+		system += e.projectFn()
+	}
+	return agent.New(label, e.provider, e.model, system,
 		tools, e.maxTurns, e.budget, e.onEvent).NewSession()
 }
 
@@ -304,6 +312,11 @@ func iterRes(status string, rounds int, exName, check, out, note string) string 
 	return string(b)
 }
 
+// lessonHint teaches the agent to persist corrections via record_lesson.
+const lessonHint = "\n\nLessons: when the user corrects you about how this project works (a " +
+	"convention, a command, a gotcha), call record_lesson with one concise sentence so the " +
+	"correction becomes durable project memory instead of a repeat mistake."
+
 // skillHint nudges the planner to consult skills when any exist.
 func skillHint(skillTools []core.Tool) string {
 	if len(skillTools) == 0 {
@@ -369,6 +382,10 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 	orchProv := provider.For(cfg.Orchestrator.Provider, cfg.Orchestrator.Endpoint, cfg.Orchestrator.APIKey, 4096)
 
+	// Standing instructions from AGENTS.md (global + project), injected into
+	// every role so all agents share the project's rules.
+	projBlock := project.Load(workdir).PromptBlock()
+
 	withBudget := func(a *agent.Agent) *agent.Agent {
 		a.CompactBudget = cfg.Orchestrator.ContextBudget
 		return a
@@ -377,24 +394,26 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	// Chat: no tools. Plan: read-only investigation + extra (no edits/delegation).
 	switch mode {
 	case ModeChat:
-		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, chatSystem,
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, chatSystem+projBlock,
 			nil, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	case ModePlan:
+		skillTools := skills.Tools(workdir)
 		planTools := append(tool.MakeReadOnly(workdir), extraOrch...)
-		planTools = append(planTools, skills.Tools()...)
-		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem+skillHint(skills.Tools()),
+		planTools = append(planTools, skillTools...)
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem+skillHint(skillTools)+projBlock,
 			planTools, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	}
 
 	// ModeAuto, solo: no executors, the orchestrator does the work itself, so it
 	// gets both role's tools.
 	if len(cfg.Executors) == 0 {
-		skillTools := skills.Tools()
+		skillTools := skills.Tools(workdir)
 		soloTools := append(tool.Make(workdir, true), extraOrch...)
 		soloTools = append(soloTools, extraExec...)
 		soloTools = append(soloTools, configtools.Tools()...)
 		soloTools = append(soloTools, skillTools...)
-		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools),
+		soloTools = append(soloTools, project.LessonTool(workdir))
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools)+lessonHint+projBlock,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		return solo, nil
@@ -402,6 +421,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 
 	runtimes := map[string]execRuntime{}
 	var order []string
+	projectFn := func() string { return project.InstructionsBlock(workdir) }
 	for _, e := range cfg.Executors {
 		runtimes[e.Name] = execRuntime{
 			name:       e.Name,
@@ -413,6 +433,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			maxResumes: e.MaxResumes,
 			extra:      extraExec,
 			onEvent:    onEvent,
+			projectFn:  projectFn,
 		}
 		order = append(order, e.Name)
 	}
@@ -657,12 +678,13 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
 			"follow-up subtask (or resolve it yourself with git) before continuing."
 	}
-	skillTools := skills.Tools()
-	system += skillHint(skillTools)
+	skillTools := skills.Tools(workdir)
+	system += skillHint(skillTools) + lessonHint + projBlock
 	tools := append(tool.Make(workdir, false), delegateTool, iterateTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
 	tools = append(tools, skillTools...)
+	tools = append(tools, project.LessonTool(workdir))
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
 		cfg.Orchestrator.MaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget
