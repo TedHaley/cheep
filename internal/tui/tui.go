@@ -33,6 +33,7 @@ import (
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/history"
+	"github.com/TedHaley/cheep/internal/inflight"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/prompts"
@@ -349,6 +350,17 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
 	(&m).rebuild(false)
+	// Surface delegations a previous cheep process left in flight (crash/kill):
+	// any work they produced survives on quarantined worktree branches.
+	for _, j := range inflight.Stale(workdir) {
+		line := errSt.Render("⚠ interrupted delegation") + hintSt.Render(" ("+j.Started.Local().Format("Jan 2 15:04")+
+			", "+j.Executor+"): "+short(strings.ReplaceAll(j.Subtask, "\n", " "), 80))
+		if j.Branch != "" {
+			line += hintSt.Render("  · partial work (if any) is on branch "+j.Branch) +
+				hintSt.Render("  · see `cheep worktree list`")
+		}
+		m.tabs[0].lines = append(m.tabs[0].lines, line)
+	}
 	if firstRun || needsSetup(m.cfg) {
 		// No config, the orchestrator can't run, or no executor is configured —
 		// cheep needs both roles, so open the configurator to set up the missing

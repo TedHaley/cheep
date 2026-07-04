@@ -25,6 +25,7 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/dispatch"
 	"github.com/TedHaley/cheep/internal/history"
+	"github.com/TedHaley/cheep/internal/inflight"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
@@ -795,6 +796,17 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 							Status: "worktree unavailable, using shared dir: " + err.Error()})
 					}
 				}
+
+				// Crash marker: if this process dies mid-delegation, the next
+				// launch surfaces the interruption (the branch survives on its
+				// quarantined slot regardless).
+				mark := inflight.Job{Workdir: workdir, Executor: j.executor, Kind: j.kind,
+					Subtask: j.subtask, Started: time.Now()}
+				if tree != nil {
+					mark.Branch = tree.Branch
+				}
+				mark = inflight.Mark(mark)
+				defer mark.Clear()
 
 				subtask := j.subtask
 				if j.kind == "scout" {
