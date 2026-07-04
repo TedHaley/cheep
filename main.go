@@ -74,6 +74,8 @@ func main() {
 		cmdKeys()
 	case "worktree":
 		cmdWorktree(os.Args[2:])
+	case "init":
+		cmdInit(os.Args[2:])
 	case "validate":
 		cmdValidate(os.Args[2:])
 	case "version", "-v", "--version":
@@ -97,6 +99,10 @@ Usage:
   cheep config [show|path]       set up or inspect your agents (manual wizard)
   cheep setup                    configure agents by chatting with a working one
   cheep keys                     show the key store (~/.cheep/keys.env)
+  cheep init [--force] [--no-assist]
+                                 set up the current project for agentic work:
+                                 AGENTS.md (+ CLAUDE.md link), detected
+                                 validation checks, git init, toolbelt skill
   cheep validate [--review] [--json]
                                  run the project's AGENTS.md '## Validation'
                                  checks (and optionally a fresh-context AI
@@ -550,6 +556,81 @@ func cmdRun(argv []string) {
 	r := orch.Run(task)
 	fmt.Println("──────────── done ────────────")
 	fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+}
+
+// ---- init -------------------------------------------------------------------
+
+// cmdInit is the project launchpad: deterministic scaffolding first (AGENTS.md
+// with detected checks, CLAUDE.md symlink, toolbelt skill, git init), then an
+// optional agent-assisted pass that explores the repo and rewrites the
+// template's prose sections to be accurate.
+func cmdInit(argv []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	dir := fs.String("dir", ".", "project directory")
+	force := fs.Bool("force", false, "overwrite an existing AGENTS.md")
+	noAssist := fs.Bool("no-assist", false, "skip the agent-assisted rewrite of AGENTS.md")
+	_ = fs.Parse(argv)
+	tty := term.IsTerminal(int(os.Stdin.Fd()))
+
+	if !worktree.IsRepo(*dir) {
+		ok := true
+		if tty {
+			fmt.Print("Not a git repository — run `git init`? [Y/n] ")
+			var ans string
+			fmt.Scanln(&ans)
+			ok = ans == "" || strings.HasPrefix(strings.ToLower(ans), "y")
+		}
+		if ok {
+			if out, err := exec.Command("git", "-C", *dir, "init").CombinedOutput(); err != nil {
+				fatal(fmt.Errorf("git init: %s", strings.TrimSpace(string(out))))
+			}
+			fmt.Println("initialized git repository")
+		}
+	}
+
+	detected := project.DetectCommands(*dir)
+	wrote, err := project.Scaffold(*dir, detected, *force)
+	if err != nil {
+		fatal(err)
+	}
+	for _, w := range wrote {
+		fmt.Println("wrote", w)
+	}
+	if len(wrote) == 0 {
+		fmt.Println("nothing to scaffold (files exist — use --force to regenerate AGENTS.md)")
+	}
+
+	if *noAssist || !tty {
+		fmt.Println("\nNext: fill in AGENTS.md's Overview and Conventions, and verify the checks under '## Validation'.")
+		return
+	}
+
+	// Agent-assisted pass: a solo agent (executors stripped — this is quick
+	// investigative work, not a fleet job) explores the repo and rewrites the
+	// template prose. Reuses the normal Build machinery end to end.
+	fmt.Println("\nExploring the project to fill in AGENTS.md (ctrl-c to skip)…")
+	cfg := ensureConfig()
+	cfg.Executors = nil
+	orch, err := orchestrator.Build(cfg, *dir, orchestrator.Options{
+		Mode: orchestrator.ModeAuto, OnEvent: printer(),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sskipping assisted pass: %v%s\n", cYellow, err, cReset)
+		return
+	}
+	r := orch.Run(`Explore this repository (read key files, directory layout, build/config files),
+then rewrite AGENTS.md so its prose matches reality:
+- Replace the Overview comment with 2-4 sentences on what the project is and how it's structured.
+- Make "## Build & Run" accurate, including any required setup.
+- Verify each command in "## Validation" actually works here; fix or remove wrong ones and keep
+  the fenced check-block format exactly (they are machine-parsed).
+- Note real conventions you can see in the code under "## Conventions".
+- Keep "## Lessons" and the overall section structure intact.
+Do not invent facts you cannot verify from the files.`)
+	if r.Status != "completed" {
+		fmt.Fprintf(os.Stderr, "%sassisted pass ended: %s%s\n", cYellow, r.Status, cReset)
+	}
+	fmt.Println("\nProject initialized. Review AGENTS.md, then run `cheep validate` to confirm the checks.")
 }
 
 // ---- validate ---------------------------------------------------------------
