@@ -31,6 +31,8 @@ var slashCmds = []slashCmd{
 	{"/budget", "set a session $ cap"},
 	{"/history", "browse and resume past conversations"},
 	{"/resume", "browse and resume past conversations"},
+	{"/fork", "branch this conversation from an earlier turn"},
+	{"/tree", "show the session tree (forks nested)"},
 	{"/keeptabs", "toggle auto-close of finished executor tabs"},
 	{"/close", "close the focused executor tab"},
 	{"/clear", "reset the conversation"},

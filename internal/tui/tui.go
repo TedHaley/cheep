@@ -139,8 +139,14 @@ type model struct {
 	histID      string
 	histStarted time.Time
 	histTitle   string
-	histList    []history.Meta // populated when the /history overlay is open
+	histParent  string         // session this one was forked from ("" = root)
+	histForkAt  int            // message index in the parent where this branch began
+	histList    []history.Meta // populated when the /history or /tree overlay is open
+	histDepth   []int          // tree depth per histList row (/tree only)
 	histCursor  int
+
+	forkPoints []int // message indices of user turns (the /fork overlay's rows)
+	forkCursor int
 }
 
 var (
@@ -1017,14 +1023,19 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
 		m.active = 0
 		(&m).rebuild(false)
-		// start a fresh history session
+		// start a fresh history session (a new root, not a fork)
 		m.histStarted = time.Now()
-		m.histID = history.NewID(m.histStarted)
+		m.histID = history.UniqueID(m.histStarted)
 		m.histTitle = ""
+		m.histParent, m.histForkAt = "", 0
 		m.footer = "(cleared)"
 		(&m).syncViewport()
 	case "/history", "/resume":
 		return m.openHistory()
+	case "/fork":
+		return m.openFork()
+	case "/tree":
+		return m.openTree()
 	case "/approval", "/approvals":
 		arg := ""
 		if f := strings.Fields(text); len(f) > 1 {

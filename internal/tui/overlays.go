@@ -87,6 +87,12 @@ func (m model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.overlay == "history" {
 		return m.updateHistory(msg)
 	}
+	if m.overlay == "fork" {
+		return m.updateFork(msg)
+	}
+	if m.overlay == "tree" {
+		return m.updateTree(msg)
+	}
 	if m.overlay == "approval" {
 		return m.updateApproval(msg)
 	}
@@ -134,6 +140,12 @@ func (m model) viewOverlay() string {
 	if m.overlay == "history" {
 		return m.viewHistory()
 	}
+	if m.overlay == "fork" {
+		return m.viewFork()
+	}
+	if m.overlay == "tree" {
+		return m.viewTree()
+	}
 	if m.overlay == "approval" {
 		return m.viewApproval()
 	}
@@ -166,6 +178,7 @@ func (m model) viewHelp() string {
 		"  /tokens          token usage + estimated $ per model (and savings)",
 		"  /budget          set a session $ cap (warns at 80%, stops at 100%)",
 		"  /history /resume browse and resume past conversations",
+		"  /fork /tree      branch from an earlier turn / navigate the session tree",
 		"  /prompts         list /name prompt templates (.cheep/prompts, ~/.cheep/prompts)",
 		"  /model           show or switch the orchestrator model mid-session",
 		"  /approval        gate risky tool calls: yolo | auto | approve",
