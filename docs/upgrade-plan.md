@@ -37,3 +37,22 @@ Decisions locked in:
 - Prompt bloat: project block clipped ~16KB; dispatch/liaison blocks terse.
 
 Full research and rationale: session notes; firstmate reference clone in scratchpad.
+
+## Addendum — pi.dev + firstmate round 2 (shipped 2026-07-04)
+
+Second wave, folding in pi's best ideas and firstmate's remaining ones:
+
+| # | Content | Packages |
+|---|---------|----------|
+| 8 | Thinking-level shorthand: `model:low\|medium\|high` suffix → Anthropic extended thinking (blocks preserved/replayed on tool turns) / OpenAI `reasoning_effort`; pricing strips the suffix; Ollama tags (`qwen3:8b`) untouched | core, provider, pricing |
+| 9 | Prompt templates: `.cheep/prompts` + `~/.cheep/prompts` markdown, `/name args`, `$ARGUMENTS`/`$1..$9`, front-matter description, autocomplete, project-shadows-global | prompts (new), tui |
+| 10 | Session tree: `Parent`/`ForkAt` on history records, `/fork` (branch from an earlier user turn), `/tree` (nested navigation), collision-safe `UniqueID` | history, tui |
+| 11 | Scout tasks: `delegate` `kind:"scout"` — worktree changes discarded, findings returned + saved to `~/.cheep/reports/` | orchestrator, worktree |
+| 12 | Delivery modes: `"delivery":"pr"` pushes validated branches + `gh pr create` instead of local merge; `/delivery` | config, worktree, orchestrator, tui |
+| 13 | Crash recovery: per-delegation inflight markers (PID-guarded), stale ones surfaced at launch; `/stow` = record_lesson sweep + structured handoff run-note | inflight (new), orchestrator, tui |
+| 14 | Pi extension bridge: embedded Node MCP-stdio bridge loads pi.dev extensions (npm or path, jiti for TS, `pi.extensions` manifest); tools-only surface; `cheep pi add/remove/list`, `"pi_extensions"` config | piext (new), mcp, config, main |
+| 15 | Remote use: tmux + Tailscale SSH recipe (docs/remote.md) — no server code | docs |
+
+Deliberately NOT taken: pi's no-subagents stance (tabs already answer the observability
+objection), firstmate secondmates (roles config covers it), session backends (TUI tabs),
+X mode.
