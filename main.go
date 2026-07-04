@@ -6,11 +6,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/TedHaley/cheep/internal/agent"
@@ -67,6 +69,8 @@ func main() {
 		cmdSetup()
 	case "keys":
 		cmdKeys()
+	case "worktree":
+		cmdWorktree(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("cheep %s\n", version)
 	case "-h", "--help", "help":
@@ -88,6 +92,9 @@ Usage:
   cheep config [show|path]       set up or inspect your agents (manual wizard)
   cheep setup                    configure agents by chatting with a working one
   cheep keys                     show the key store (~/.cheep/keys.env)
+  cheep worktree <acquire|release|list> [--json]
+                                 manage the pooled git worktrees (toolbelt for
+                                 other harnesses; cheep uses the pool itself)
   cheep version                  print the version
 
 On first use, cheep walks you through choosing an orchestrator and, optionally,
@@ -534,6 +541,72 @@ func cmdRun(argv []string) {
 	r := orch.Run(task)
 	fmt.Println("──────────── done ────────────")
 	fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+}
+
+// ---- worktree ---------------------------------------------------------------
+
+// cmdWorktree is the headless pool interface, usable by other harnesses:
+//
+//	cheep worktree acquire --name fix-login [--json]   → prints the worktree path
+//	cheep worktree release --path <p> [--landed]
+//	cheep worktree list [--json]
+//
+// CLI acquires hold a lease in the slot's state file (a process that exits
+// can't hold a flock); release it with `cheep worktree release`.
+func cmdWorktree(argv []string) {
+	if len(argv) == 0 {
+		fatal(fmt.Errorf("usage: cheep worktree <acquire|release|list> [flags]"))
+	}
+	sub, rest := argv[0], argv[1:]
+	fs := flag.NewFlagSet("worktree", flag.ExitOnError)
+	repo := fs.String("repo", ".", "repository the pool belongs to")
+	name := fs.String("name", "task", "short task name used in the branch name")
+	path := fs.String("path", "", "slot path (release)")
+	landed := fs.Bool("landed", false, "the slot's work is merged/landed (release)")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	_ = fs.Parse(rest)
+
+	pool, err := worktree.OpenPool(*repo)
+	if err != nil {
+		fatal(err)
+	}
+	switch sub {
+	case "acquire":
+		t, err := pool.Acquire(*name, int(time.Now().Unix()%100000), true)
+		if err != nil {
+			fatal(err)
+		}
+		if *asJSON {
+			b, _ := json.Marshal(map[string]string{"path": t.Path, "branch": t.Branch, "base": t.Base})
+			fmt.Println(string(b))
+		} else {
+			fmt.Println(t.Path)
+		}
+	case "release":
+		if *path == "" {
+			fatal(fmt.Errorf("release needs --path"))
+		}
+		if err := pool.ReleaseByPath(*path, *landed); err != nil {
+			fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "released")
+	case "list":
+		slots := pool.List()
+		if *asJSON {
+			b, _ := json.MarshalIndent(slots, "", "  ")
+			fmt.Println(string(b))
+			return
+		}
+		if len(slots) == 0 {
+			fmt.Println("no slots yet")
+			return
+		}
+		for _, s := range slots {
+			fmt.Printf("%-12s %-30s %s\n", s.State, s.Branch, s.Path)
+		}
+	default:
+		fatal(fmt.Errorf("unknown worktree subcommand %q", sub))
+	}
 }
 
 // ---- check ----------------------------------------------------------------

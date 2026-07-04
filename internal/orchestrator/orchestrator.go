@@ -440,6 +440,25 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	defaultExec := order[0]
 	isolated := isolate && worktree.IsRepo(workdir)
 
+	// Pooled worktrees keep gitignored build artifacts warm across subtasks.
+	// Nil pool (disabled, unsupported platform, or open failure) falls back to
+	// ephemeral per-subtask worktrees.
+	var pool *worktree.Pool
+	if isolated && !cfg.DisablePool {
+		if p, err := worktree.OpenPool(workdir); err == nil {
+			pool = p
+		}
+	}
+	// release returns a tree with its work either landed (merged / nothing to
+	// keep) or preserved (quarantined slot or kept branch).
+	release := func(t *worktree.Tree, landed bool) {
+		if pool != nil {
+			pool.Release(t, landed)
+			return
+		}
+		t.Remove(!landed)
+	}
+
 	// Cheap-first escalation: order executors by cost so a failed subtask can be
 	// retried on a more capable (pricier) executor before giving up.
 	scoreByName := map[string]float64{}
@@ -585,7 +604,15 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 				var tree *worktree.Tree
 				if isolated {
 					gitMu.Lock()
-					t, err := worktree.Add(workdir, start.name, id)
+					var t *worktree.Tree
+					var err error
+					if pool != nil {
+						if t, err = pool.Acquire(start.name, id, false); err != nil {
+							t, err = worktree.Add(workdir, start.name, id) // pool exhausted → ephemeral
+						}
+					} else {
+						t, err = worktree.Add(workdir, start.name, id)
+					}
 					gitMu.Unlock()
 					if err == nil {
 						tree, wd = t, t.Path
@@ -615,17 +642,17 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 					switch {
 					case cErr != nil:
 						res["integration"] = "commit failed: " + cErr.Error()
-						tree.Remove(true)
+						release(tree, false)
 					case !committed:
 						res["integration"] = "no file changes"
-						tree.Remove(false)
+						release(tree, true)
 					default:
 						if mErr := tree.MergeInto(); mErr != nil {
 							res["integration"] = mErr.Error() + " (kept on branch " + tree.Branch + ")"
-							tree.Remove(true)
+							release(tree, false)
 						} else {
 							res["integration"] = "merged"
-							tree.Remove(false)
+							release(tree, true)
 						}
 					}
 					gitMu.Unlock()
