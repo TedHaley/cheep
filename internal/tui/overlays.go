@@ -166,6 +166,7 @@ func (m model) viewHelp() string {
 		"  /tokens          token usage + estimated $ per model (and savings)",
 		"  /budget          set a session $ cap (warns at 80%, stops at 100%)",
 		"  /history /resume browse and resume past conversations",
+		"  /model           show or switch the orchestrator model mid-session",
 		"  /approval        gate risky tool calls: yolo | auto | approve",
 		"  /clear           reset the conversation",
 		"  /help            this panel        /exit  quit",

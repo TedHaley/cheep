@@ -94,7 +94,9 @@ func usage() {
 
 Usage:
   cheep                          start the interactive shell (default)
-  cheep run "<task>" [--workdir] run a single task non-interactively
+  cheep run "<task>" [--workdir] [--json]
+                                 run a single task non-interactively; --json
+                                 streams JSONL events for scripting/CI
   cheep check                    ping the orchestrator and every executor
   cheep config [show|path]       set up or inspect your agents (manual wizard)
   cheep setup                    configure agents by chatting with a working one
@@ -536,26 +538,55 @@ func cmdRun(argv []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	workdir := fs.String("workdir", ".", "workspace directory the agents operate in")
 	isolate := fs.Bool("isolate", true, "run each parallel subtask in its own git worktree (if workdir is a git repo)")
+	asJSON := fs.Bool("json", false, "emit JSONL events on stdout (human chrome goes to stderr)")
 	_ = fs.Parse(argv)
 
 	task := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if task == "" {
-		fatal(fmt.Errorf(`no task provided — try: cheep run "fix the failing test"`))
+		fmt.Fprintln(os.Stderr, `cheep: no task provided — try: cheep run "fix the failing test"`)
+		os.Exit(2)
 	}
 
 	cfg := ensureConfig()
 	mt, mcpSess := startMCP(cfg)
 	defer mcpSess.Close()
+
+	// --json: one {"type":"event",...} line per core.Event on stdout, then a
+	// final {"type":"result",...} line. Treat this shape as a public API.
+	onEvent := printer()
+	if *asJSON {
+		var mu sync.Mutex
+		enc := json.NewEncoder(os.Stdout)
+		onEvent = func(e core.Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			_ = enc.Encode(map[string]any{"type": "event", "ts": time.Now().UTC().Format(time.RFC3339), "event": e})
+		}
+	}
+
 	orch, err := orchestrator.Build(cfg, *workdir, orchestrator.Options{
-		Isolate: *isolate, Mode: orchestrator.ModeAuto, ExtraOrch: mt.Orchestrator, ExtraExec: mt.Executor, OnEvent: printer(),
+		Isolate: *isolate, Mode: orchestrator.ModeAuto, ExtraOrch: mt.Orchestrator, ExtraExec: mt.Executor, OnEvent: onEvent,
 	})
 	if err != nil {
-		fatal(err)
+		fmt.Fprintf(os.Stderr, "%scheep: %v%s\n", cRed, err, cReset)
+		os.Exit(2)
 	}
-	fmt.Println("──────────── cheep ────────────")
+	if !*asJSON {
+		fmt.Println("──────────── cheep ────────────")
+	}
 	r := orch.Run(task)
-	fmt.Println("──────────── done ────────────")
-	fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+	if *asJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"type": "result", "status": r.Status, "output": r.Output, "turns": r.Turns,
+			"input_tokens": r.InputTokens, "output_tokens": r.OutputTokens,
+		})
+	} else {
+		fmt.Println("──────────── done ────────────")
+		fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+	}
+	if r.Status != "completed" {
+		os.Exit(1)
+	}
 }
 
 // ---- init -------------------------------------------------------------------

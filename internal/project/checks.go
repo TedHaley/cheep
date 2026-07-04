@@ -32,11 +32,11 @@ func ParseChecks(md string) []Check {
 	}
 	var checks []Check
 	lines := strings.Split(md, "\n")
-	depth := 0            // heading depth of the Validation section; 0 = not in it
-	var fence string      // the opening fence marker when inside a code block
-	var fenceName string  // name for the current fenced check ("" = not a check block)
-	var script []string   // accumulated lines of the current fenced check
-	anon := 0             // counter for unnamed checks
+	depth := 0           // heading depth of the Validation section; 0 = not in it
+	var fence string     // the opening fence marker when inside a code block
+	var fenceName string // name for the current fenced check ("" = not a check block)
+	var script []string  // accumulated lines of the current fenced check
+	anon := 0            // counter for unnamed checks
 
 	flush := func() {
 		if fenceName == "" {

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,7 +52,6 @@ type switchMsg struct {
 	ok  bool
 	err string
 }
-
 
 type cmdResultMsg struct {
 	cmd    string
@@ -116,6 +116,9 @@ type model struct {
 
 	gate      *approve.Gate     // approval gating for shared-workspace tools
 	approvals []approve.Request // pending approval requests (FIFO)
+
+	comp     compState // input completion dropdown (slash commands, @-files)
+	fileList []string  // workspace files for @-mentions
 
 	// overlay: "" (none) | "help" | "setup" | "setupwiz" | "approval"
 	overlay string
@@ -245,7 +248,6 @@ func todoHeaderLines(todos []todoItem) []string {
 	return out
 }
 
-
 // queueHeaderLines renders the queued messages as a sticky header.
 func queueHeaderLines(queued []string) []string {
 	if len(queued) == 0 {
@@ -314,6 +316,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		cfg:       cfg,
 		workdir:   workdir,
 		gate:      approve.New(gateMode),
+		fileList:  loadFileList(workdir),
 		mode:      orchestrator.ModeAuto,
 		extraOrch: extraOrch,
 		extraExec: extraExec,
@@ -516,7 +519,6 @@ func probeCmd(cfg config.Config) tea.Cmd {
 	}
 }
 
-
 // bashCmd runs a shell command and returns the result as a cmdResultMsg.
 func bashCmd(cmdStr string) tea.Cmd {
 	return func() tea.Msg {
@@ -543,6 +545,7 @@ func bashCmd(cmdStr string) tea.Cmd {
 		}
 	}
 }
+
 // relayout sizes the input to its content (1–6 lines) and gives the rest to the log.
 func (m *model) relayout() {
 	lines := strings.Count(m.input.Value(), "\n") + 1
@@ -648,7 +651,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nudges, m.openTodos = 0, 0
 			return m.startTask(next)
 		}
-		return m, nil
+		mark := "✓"
+		if msg.r.Status != "completed" {
+			mark = "⚠"
+		}
+		return m, tea.SetWindowTitle("cheep " + mark + " " + msg.r.Status + " — " + filepath.Base(m.workdir))
 
 	case ovDoneMsg:
 		m.ovBusy = false
@@ -668,7 +675,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(&m).syncViewport()
 		}
 		return m, nil
-
 
 	case cmdResultMsg:
 		m.running = false
@@ -723,6 +729,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.overlay != "" {
 			return m.updateOverlay(msg)
+		}
+		// The completion dropdown captures navigation keys while open.
+		if len(m.comp.opts) > 0 {
+			switch msg.String() {
+			case "up":
+				m.comp.idx = (m.comp.idx - 1 + len(m.comp.opts)) % len(m.comp.opts)
+				return m, nil
+			case "down":
+				m.comp.idx = (m.comp.idx + 1) % len(m.comp.opts)
+				return m, nil
+			case "tab":
+				(&m).acceptCompletion()
+				(&m).updateCompletions()
+				(&m).relayout()
+				return m, nil
+			case "enter":
+				if (&m).acceptCompletion() == "slash" {
+					return m.submit() // run the chosen command immediately
+				}
+				(&m).relayout()
+				return m, nil
+			case "esc":
+				m.comp = compState{}
+				return m, nil
+			}
 		}
 		switch msg.String() {
 		case "ctrl+c":
@@ -796,6 +827,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		(&m).updateCompletions()
 		(&m).relayout()
 		return m, cmd
 
@@ -923,7 +955,8 @@ func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	s := m.session
 	run := func() tea.Msg { return doneMsg{s.SendCtx(ctx, text)} }
-	return m, tea.Batch(m.sp.Tick, run)
+	return m, tea.Batch(m.sp.Tick, run,
+		tea.SetWindowTitle("cheep ● working — "+filepath.Base(m.workdir)))
 }
 
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
@@ -978,6 +1011,24 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 			arg = f[1]
 		}
 		return m.setApprovalMode(arg)
+	case "/model":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			m.footer = "orchestrator model: " + m.cfg.Orchestrator.Model + " — /model <name> switches (conversation is kept)"
+			return m, nil
+		}
+		m.cfg.Orchestrator.Model = f[1]
+		if err := config.Save(m.cfg); err != nil {
+			m.footer = "model not saved: " + err.Error()
+			return m, nil
+		}
+		m.pendingCfg = m.cfg // skip the config-change re-verification round-trip
+		(&m).rebuild(true)   // history is threaded through, so context survives
+		if m.buildErr != nil {
+			m.footer = "model switch failed: " + errText(m.buildErr)
+		} else {
+			m.footer = "orchestrator now on " + f[1]
+		}
 	case "/budget":
 		f := strings.Fields(text)
 		switch {
@@ -1170,8 +1221,8 @@ func (m *model) applyEvent(e core.Event) {
 	case "text":
 		if strings.TrimSpace(e.Text) != "" {
 
-		// Add a visual separator between user input and assistant response
-		m.appendLine(idx, sepSt.Render(strings.Repeat("─", max(1, m.w-2))))
+			// Add a visual separator between user input and assistant response
+			m.appendLine(idx, sepSt.Render(strings.Repeat("─", max(1, m.w-2))))
 			for _, l := range renderMarkdown(e.Text, m.w) {
 				m.appendLine(idx, l)
 			}
@@ -1275,6 +1326,9 @@ func (m model) View() string {
 		if len(queueLines) > 0 {
 			parts = append(parts, strings.Join(queueLines, "\n"))
 		}
+	}
+	if comp := m.viewCompletions(); comp != "" {
+		parts = append(parts, comp)
 	}
 	parts = append(parts, rule, m.input.View(), rule, hint)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
