@@ -51,6 +51,31 @@ you can use it for both roles. Then you get an interactive prompt:
 Type a task and the orchestrator plans, delegates, verifies, and reports back. Reopen the
 configurator any time with `/config`.
 
+## Project launchpad & validation
+
+cheep is also the entry point for setting up any project for agentic work:
+
+```sh
+cheep init                # AGENTS.md (+ CLAUDE.md link), detected validation checks,
+                          # git init, and a toolbelt skill for other harnesses
+cheep validate [--review] # run the AGENTS.md '## Validation' checks (+ optional
+                          # fresh-context AI review of your branch diff); exit 0 = pass
+cheep worktree …          # pooled, artifact-warm git worktrees for parallel work
+```
+
+Every agent's prompt carries your global `~/AGENTS.md` and the project's
+`AGENTS.md`; corrections you give are written back to its `## Lessons` section
+via the `record_lesson` tool. Delegated subtasks are validated (checks + a
+fresh-context reviewer with bounded fix rounds) **before** their worktree
+merges; failed work stays on its branch, never lost. These files use the open
+AGENTS.md / Agent Skills standards, so Claude Code, Codex, and friends read
+the same setup — and can shell out to `cheep validate` / `cheep worktree` via
+the bundled skill. Skills load project-first from `.agents/skills` and
+`.claude/skills`, then `~/.claude/skills` and `~/.cheep/skills` (SKILL.md
+directories or flat `.md` files). Steer which executor gets which kind of
+work with natural-language rules in `.cheep/dispatch.json`, and gate risky
+tool calls with `/approval yolo|auto|approve` (file writes preview as diffs).
+
 ## Configuration
 
 cheep keeps everything in its home directory, **`~/.cheep/`** (override with `CHEEP_HOME`):
