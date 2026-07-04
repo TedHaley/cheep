@@ -87,6 +87,9 @@ func (m model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.overlay == "history" {
 		return m.updateHistory(msg)
 	}
+	if m.overlay == "approval" {
+		return m.updateApproval(msg)
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m.closeSetup()
@@ -131,6 +134,9 @@ func (m model) viewOverlay() string {
 	if m.overlay == "history" {
 		return m.viewHistory()
 	}
+	if m.overlay == "approval" {
+		return m.viewApproval()
+	}
 	title := lipgloss.NewStyle().Bold(true).Render(m.ovTitle)
 	m.ovInput.Prompt = "setup › "
 	hint := hintSt.Render("Enter: send · Esc or /done: finish · pgup/pgdn: scroll")
@@ -160,6 +166,7 @@ func (m model) viewHelp() string {
 		"  /tokens          token usage + estimated $ per model (and savings)",
 		"  /budget          set a session $ cap (warns at 80%, stops at 100%)",
 		"  /history /resume browse and resume past conversations",
+		"  /approval        gate risky tool calls: yolo | auto | approve",
 		"  /clear           reset the conversation",
 		"  /help            this panel        /exit  quit",
 		"",

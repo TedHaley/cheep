@@ -62,6 +62,11 @@ type Config struct {
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
 
+	// ApprovalMode gates risky tool calls in the shared workspace:
+	// "yolo" (nothing), "auto" (file writes ask; default), "approve"
+	// (writes and shell commands ask). Worktree work is never gated.
+	ApprovalMode string `json:"approval_mode,omitempty"`
+
 	// Validation configures the pre-merge pipeline run on each delegated
 	// subtask's worktree (checks from AGENTS.md '## Validation', then a
 	// fresh-context review). Zero value = enabled with defaults.

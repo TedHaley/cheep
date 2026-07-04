@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TedHaley/cheep/internal/agent"
+	"github.com/TedHaley/cheep/internal/approve"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
@@ -195,10 +196,15 @@ type execRuntime struct {
 	extra      []core.Tool
 	onEvent    core.EventFunc
 	projectFn  func() string // project instructions, re-read per session
+	gate       *approve.Gate
+	root       string // the user's real workdir (worktrees differ from it)
 }
 
 func (e execRuntime) newSession(workdir, label string) *agent.Session {
-	tools := append(tool.Make(workdir, true), e.extra...)
+	// Only work in the SHARED workspace is gated; isolated worktrees answer
+	// to the validation pipeline and the merge boundary instead.
+	shared := workdir == e.root
+	tools := append(e.gate.Wrap(tool.Make(workdir, true), shared, workdir), e.extra...)
 	system := executorSystem
 	if e.projectFn != nil {
 		// Read from the repo root (not the worktree copy) so uncommitted
@@ -448,6 +454,7 @@ type Options struct {
 	ExtraOrch []core.Tool
 	ExtraExec []core.Tool
 	OnEvent   core.EventFunc
+	Gate      *approve.Gate // nil = no approval gating
 }
 
 // Build returns the orchestrator agent wired per opt.
@@ -493,7 +500,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	// gets both role's tools.
 	if len(cfg.Executors) == 0 {
 		skillTools := skills.Tools(workdir)
-		soloTools := append(tool.Make(workdir, true), extraOrch...)
+		soloTools := append(opt.Gate.Wrap(tool.Make(workdir, true), true, workdir), extraOrch...)
 		soloTools = append(soloTools, extraExec...)
 		soloTools = append(soloTools, configtools.Tools()...)
 		soloTools = append(soloTools, skillTools...)
@@ -519,6 +526,8 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			extra:      extraExec,
 			onEvent:    onEvent,
 			projectFn:  projectFn,
+			gate:       opt.Gate,
+			root:       workdir,
 		}
 		order = append(order, e.Name)
 	}
@@ -847,7 +856,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 	skillTools := skills.Tools(workdir)
 	system += skillHint(skillTools) + lessonHint + projBlock
-	tools := append(tool.Make(workdir, false), delegateTool, iterateTool)
+	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
 	tools = append(tools, skillTools...)

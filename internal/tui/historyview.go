@@ -97,6 +97,7 @@ func (m model) resumeHistory(id string) (tea.Model, tea.Cmd) {
 	m.histID, m.histStarted, m.histTitle = r.ID, r.Started, r.Title
 	orch, berr := orchestrator.Build(m.cfg, m.workdir, orchestrator.Options{
 		Isolate: true, Mode: m.mode, ExtraOrch: m.extraOrch, ExtraExec: m.extraExec, OnEvent: m.onEvent,
+		Gate: m.gate,
 	})
 	m.buildErr = berr
 	if berr != nil {

@@ -27,6 +27,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/TedHaley/cheep/internal/agent"
+	"github.com/TedHaley/cheep/internal/approve"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
@@ -113,7 +114,10 @@ type model struct {
 	usageOrder []string          // models in first-seen order
 	usageRole  map[string][2]int // "orchestrator"/"executor" -> {input, output}
 
-	// overlay: "" (none) | "help" | "setup" | "setupwiz"
+	gate      *approve.Gate     // approval gating for shared-workspace tools
+	approvals []approve.Request // pending approval requests (FIFO)
+
+	// overlay: "" (none) | "help" | "setup" | "setupwiz" | "approval"
 	overlay string
 	ovTitle string
 	ovInput textinput.Model
@@ -281,6 +285,11 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 			p.Send(evMsg(e))
 		}
 	}()
+	go func() {
+		for r := range m.gate.Requests {
+			p.Send(approvalMsg{r})
+		}
+	}()
 	_, err := p.Run()
 	return err
 }
@@ -300,9 +309,11 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
+	gateMode, _ := approve.ParseMode(cfg.ApprovalMode)
 	m := model{
 		cfg:       cfg,
 		workdir:   workdir,
+		gate:      approve.New(gateMode),
 		mode:      orchestrator.ModeAuto,
 		extraOrch: extraOrch,
 		extraExec: extraExec,
@@ -429,6 +440,7 @@ func (m *model) rebuild(keep bool) {
 	}
 	orch, err := orchestrator.Build(m.cfg, m.workdir, orchestrator.Options{
 		Isolate: true, Mode: m.mode, ExtraOrch: m.extraOrch, ExtraExec: m.extraExec, OnEvent: m.onEvent,
+		Gate: m.gate,
 	})
 	m.buildErr = err
 	if err != nil {
@@ -578,9 +590,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(&m).applyEvent(core.Event(msg))
 		return m, nil
 
+	case approvalMsg:
+		return m.pushApproval(msg.req)
+
 	case doneMsg:
 		m.running = false
 		m.cancel = nil
+		// A finished/cancelled run can leave queued approvals nobody is
+		// waiting on (the gated calls unblocked via ctx.Done). Drop them.
+		if len(m.approvals) > 0 {
+			for _, r := range m.approvals {
+				select {
+				case r.Resp <- approve.Deny:
+				default:
+				}
+			}
+			m.approvals = nil
+			if m.overlay == "approval" {
+				m.overlay = ""
+			}
+		}
 		m.tabs[0].status = statusKey(msg.r.Status)
 		m.footer = fmt.Sprintf("%s · %d turns · %s in / %s out (this turn)", msg.r.Status, msg.r.Turns, human(msg.r.InputTokens), human(msg.r.OutputTokens))
 		if m.keepTabs {
@@ -943,6 +972,12 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		(&m).syncViewport()
 	case "/history", "/resume":
 		return m.openHistory()
+	case "/approval", "/approvals":
+		arg := ""
+		if f := strings.Fields(text); len(f) > 1 {
+			arg = f[1]
+		}
+		return m.setApprovalMode(arg)
 	case "/budget":
 		f := strings.Fields(text)
 		switch {
