@@ -184,6 +184,7 @@ func (m model) viewHelp() string {
 		"  /stow            sweep lessons + a handoff note to disk before /clear",
 		"  /model           show or switch the orchestrator model mid-session",
 		"  /approval        gate risky tool calls: yolo | auto | approve",
+		"  /nomistakes      strictest safety: gates everything, merges need your sign-off",
 		"  /clear           reset the conversation",
 		"  /help            this panel        /exit  quit",
 		"",

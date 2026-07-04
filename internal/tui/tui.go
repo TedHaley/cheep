@@ -323,6 +323,9 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	sp.Spinner = spinner.Dot
 
 	gateMode, _ := approve.ParseMode(cfg.ApprovalMode)
+	if cfg.NoMistakes {
+		gateMode = approve.ModeApprove // no-mistakes implies the strictest gate
+	}
 	m := model{
 		cfg:        cfg,
 		workdir:    workdir,
@@ -1089,6 +1092,36 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.stowing = true
 		return m.sendUser(stowPrompt, hintSt.Render("⚓ stowing session knowledge to disk"))
+	case "/nomistakes", "/no-mistakes":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			state := "OFF"
+			if m.cfg.NoMistakes {
+				state = "ON"
+			}
+			m.footer = "no-mistakes: " + state + " — /nomistakes on|off (every write/command asks; merges need your sign-off)"
+			return m, nil
+		}
+		switch f[1] {
+		case "on":
+			m.cfg.NoMistakes = true
+			m.gate.SetMode(approve.ModeApprove)
+			_ = config.Save(m.cfg)
+			(&m).rebuild(true)
+			m.footer = "no-mistakes ON — shared writes/commands ask first, and nothing merges without your approval"
+		case "off":
+			m.cfg.NoMistakes = false
+			md, ok := approve.ParseMode(m.cfg.ApprovalMode)
+			if !ok {
+				md = approve.ModeAuto
+			}
+			m.gate.SetMode(md)
+			_ = config.Save(m.cfg)
+			(&m).rebuild(true)
+			m.footer = "no-mistakes OFF — approvals back to " + string(md) + ", merges are automatic again"
+		default:
+			m.footer = "usage: /nomistakes on|off"
+		}
 	case "/approval", "/approvals":
 		arg := ""
 		if f := strings.Fields(text); len(f) > 1 {

@@ -99,6 +99,12 @@ func (t *Tree) Discard() {
 	_, _ = git(t.Path, "clean", "-fd")
 }
 
+// Diff returns the unified diff of the branch against its base commit.
+func (t *Tree) Diff() string {
+	out, _ := git(t.Path, "diff", t.Base+"..HEAD")
+	return out
+}
+
 // PushAndPR pushes the worktree's branch to origin and opens a pull request
 // with the gh CLI. Returns the PR URL.
 func (t *Tree) PushAndPR(title, body string) (string, error) {

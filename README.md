@@ -231,6 +231,16 @@ A scout's file changes are **discarded**; its findings come back directly and ar
 report under `~/.cheep/reports/` — no merge machinery runs, so cheap-model research gets
 even cheaper.
 
+### No-mistakes mode
+
+`/nomistakes on` (firstmate's strictest safety posture) makes cheep incapable of changing
+your checkout without an explicit yes: every shared-workspace write and shell command asks
+first, and a validated subtask branch is merged **only after you approve its diff** in the
+approval overlay (`y`/`n`, scrollable preview). Declined or unattended work is never lost —
+it stays on its branch, and headless runs (`cheep run`, CI) hold everything on branches
+because there is no approver. `/nomistakes off` returns to your configured `/approval` mode
+and automatic merges.
+
 ### Delivery: local merge or pull requests
 
 By default validated worktree changes merge into your local checkout. `/delivery pr` (or

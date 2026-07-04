@@ -41,7 +41,7 @@ func (m *model) syncApprovalVP() {
 	r := m.approvals[0]
 	var body string
 	switch r.Tool {
-	case "write_file":
+	case "write_file", "merge":
 		body = colorDiff(r.Diff)
 	case "run_bash":
 		body = "$ " + r.Cmd

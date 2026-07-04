@@ -24,6 +24,7 @@ var slashCmds = []slashCmd{
 	{"/mode", "cycle chat → plan → auto"},
 	{"/model", "show or switch the orchestrator model"},
 	{"/approval", "gate risky tool calls: yolo | auto | approve"},
+	{"/nomistakes", "strictest safety: merges wait for your sign-off"},
 	{"/config", "set up agents from discovered servers + keys"},
 	{"/setup", "configure by chatting with a working agent"},
 	{"/status", "show current setup"},

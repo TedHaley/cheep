@@ -85,6 +85,28 @@ func (g *Gate) SetMode(m Mode) { g.mode.Store(m) }
 // Mode returns the current strictness.
 func (g *Gate) Mode() Mode { return g.mode.Load().(Mode) }
 
+// Ask blocks on a bespoke approval request outside the tool path (e.g. a
+// branch merge in no-mistakes mode) and returns the user's decision. Fails
+// closed: a nil Gate, a cancelled run, or an absent approver all deny —
+// nothing lands without an explicit yes.
+func (g *Gate) Ask(ctx context.Context, req Request) Decision {
+	if g == nil {
+		return Deny
+	}
+	req.Resp = make(chan Decision, 1)
+	select {
+	case g.Requests <- req:
+	case <-ctx.Done():
+		return Deny
+	}
+	select {
+	case d := <-req.Resp:
+		return d
+	case <-ctx.Done():
+		return Deny
+	}
+}
+
 // Wrap returns tools with gating applied. shared marks tools operating on the
 // user's real workspace (as opposed to an isolated worktree); only shared
 // tools are ever gated. workdir resolves relative paths for diff previews. A

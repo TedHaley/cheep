@@ -734,6 +734,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 
 	delivery := cfg.Delivery
+	noMistakes := cfg.NoMistakes
 
 	delegate := func(ctx context.Context, args map[string]any) string {
 		rawTasks, _ := args["tasks"].([]any)
@@ -876,6 +877,17 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 						res["validation"] = slimValidation(vres)
 					}
 
+					// No-mistakes: the user signs off on the diff BEFORE anything
+					// merges. Asked outside gitMu so a pending approval never
+					// blocks the other subtasks' integration; fails closed when
+					// there is no approver (headless) or the run is cancelled.
+					mergeOK := true
+					if noMistakes && delivery != "pr" && cErr == nil && committed && passed {
+						d := opt.Gate.Ask(ctx, approve.Request{Agent: rt.name, Tool: "merge",
+							Path: tree.Branch, Diff: tree.Diff()})
+						mergeOK = d == approve.Allow || d == approve.AllowSession
+					}
+
 					gitMu.Lock()
 					switch {
 					case cErr != nil:
@@ -886,6 +898,9 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 						release(tree, true)
 					case !passed:
 						res["integration"] = "failed validation (work kept on branch " + tree.Branch + ")"
+						release(tree, false)
+					case !mergeOK:
+						res["integration"] = "no-mistakes: not merged — awaiting/declined approval (work kept on branch " + tree.Branch + ")"
 						release(tree, false)
 					case delivery == "pr":
 						title := clip(strings.ReplaceAll(strings.TrimSpace(j.subtask), "\n", " "), 70)
@@ -969,6 +984,12 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +
 			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
 			"follow-up subtask (or resolve it yourself with git) before continuing."
+		if cfg.NoMistakes && cfg.Delivery != "pr" {
+			system += "\n\nNO-MISTAKES mode is ON: a validated subtask's branch merges ONLY after the " +
+				"user approves its diff. A result whose integration says \"no-mistakes: not merged\" " +
+				"is NOT a failure — the work is safe on the named branch awaiting the user's sign-off; " +
+				"report it that way and do not re-delegate it."
+		}
 		if delivery := cfg.Delivery; delivery == "pr" {
 			system += "\n\nDelivery is PR mode: validated ship subtasks are NOT merged locally — each " +
 				"branch is pushed and opened as a pull request (the result's \"pr\" field has the URL). " +

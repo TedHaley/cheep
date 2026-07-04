@@ -68,6 +68,12 @@ type Config struct {
 	// MCP server's.
 	PiExtensions []string `json:"pi_extensions,omitempty"`
 
+	// NoMistakes is firstmate's strictest safety mode: every shared write and
+	// shell command asks first, and NOTHING merges into the local checkout
+	// until the user approves the branch diff. Headless runs (no approver)
+	// keep all work on branches.
+	NoMistakes bool `json:"no_mistakes,omitempty"`
+
 	// Delivery is how validated worktree changes land: "merge" (default) merges
 	// them into the local checkout; "pr" pushes each subtask branch and opens a
 	// pull request with the gh CLI instead.
