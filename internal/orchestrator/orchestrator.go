@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -149,8 +151,11 @@ Be economical: plan and delegate rather than doing the work yourself.
 - DECOMPOSE the task into concrete, self-contained subtasks.
 - DELEGATE with the "delegate" tool. It takes a LIST of tasks and runs them in PARALLEL,
   so dispatch independent subtasks together in ONE call. Each task is
-  {"executor": "<name>", "subtask": "<full instructions>"}. Updating todos is NOT doing the
-  work — only delegate (then verify) actually does it.
+  {"executor": "<name>", "subtask": "<full instructions>", "kind": "ship"|"scout"}. Updating
+  todos is NOT doing the work — only delegate (then verify) actually does it.
+- SCOUT vs SHIP: mark investigation, audit, research, and planning subtasks "kind":"scout" —
+  a scout's file changes are discarded and its findings come back in "output" (also saved to
+  the "report" path). Use "ship" (the default) only when the subtask must change files.
 - ROUTE each subtask to the CHEAPEST executor that can do it well (they are listed
   cheapest-first with cost tiers). Reserve pricier executors for genuinely hard subtasks;
   a failed cheap attempt auto-escalates to a stronger one, so default to cheap. Mind the
@@ -361,6 +366,24 @@ func iterRes(status string, rounds int, exName, check, out, note string) string 
 	return string(b)
 }
 
+// writeReport persists a scout task's findings to ~/.cheep/reports and returns
+// the file path (firstmate's data/<id>/report.md, adapted).
+func writeReport(executor string, id int, subtask, output string) (string, error) {
+	home, err := config.Home()
+	if err != nil {
+		return "", err
+	}
+	d := filepath.Join(home, "reports")
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("%s-%s-%d.md", time.Now().UTC().Format("20060102-150405"), executor, id)
+	path := filepath.Join(d, name)
+	md := "# Scout report — " + executor + "\n\n" + time.Now().Local().Format("2006-01-02 15:04") +
+		"\n\n## Subtask\n\n" + strings.TrimSpace(subtask) + "\n\n## Findings\n\n" + strings.TrimSpace(output) + "\n"
+	return path, os.WriteFile(path, []byte(md), 0o600)
+}
+
 // batchNote renders one delegate batch as a run-notes entry.
 func batchNote(subtasks []string, results []map[string]any) string {
 	var b strings.Builder
@@ -388,6 +411,9 @@ func batchNote(subtasks []string, results []map[string]any) string {
 		}
 		if esc, ok := r["escalation"].(string); ok && esc != "" {
 			fmt.Fprintf(&b, "  - escalation: %s\n", esc)
+		}
+		if rep, ok := r["report"].(string); ok && rep != "" {
+			fmt.Fprintf(&b, "  - report: %s\n", rep)
 		}
 	}
 	return b.String()
@@ -709,18 +735,22 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			return `ERROR: "tasks" must be a non-empty array of {"executor","subtask"}`
 		}
 		type job struct {
-			executor, subtask string
+			executor, subtask, kind string
 		}
 		jobs := make([]job, len(rawTasks))
 		for i, rt := range rawTasks {
 			m, _ := rt.(map[string]any)
 			ex, _ := m["executor"].(string)
 			st, _ := m["subtask"].(string)
+			kind, _ := m["kind"].(string)
+			if kind != "scout" {
+				kind = "" // ship is the default
+			}
 			resolved, err := resolveExecutor(ex, runtimes, defaultExec, rules.Active())
 			if err != nil {
 				return fmt.Sprintf("ERROR: task %d: %v", i+1, err)
 			}
-			jobs[i] = job{executor: resolved, subtask: st}
+			jobs[i] = job{executor: resolved, subtask: st, kind: kind}
 		}
 
 		results := make([]map[string]any, len(jobs))
@@ -761,7 +791,12 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 					}
 				}
 
-				r, rt, trail := runJob(ctx, wd, j.subtask, j.executor, id)
+				subtask := j.subtask
+				if j.kind == "scout" {
+					subtask = "SCOUT task — investigate and report only. Any file changes you make " +
+						"will be DISCARDED, so put your COMPLETE findings in your final reply.\n\n" + subtask
+				}
+				r, rt, trail := runJob(ctx, wd, subtask, j.executor, id)
 				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,
@@ -773,6 +808,22 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 				}
 				if len(trail) > 1 {
 					res["escalation"] = strings.Join(trail, " → ")
+				}
+
+				if j.kind == "scout" {
+					// Scouts deliver a report, not changes: discard whatever
+					// they touched and persist the findings as an artifact.
+					if path, err := writeReport(rt.name, id, j.subtask, r.Output); err == nil {
+						res["report"] = path
+					}
+					if tree != nil {
+						gitMu.Lock()
+						tree.Discard()
+						release(tree, true)
+						gitMu.Unlock()
+					}
+					results[i] = res
+					return
 				}
 
 				if tree != nil {
@@ -865,6 +916,13 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 							"subtask": map[string]any{
 								"type":        "string",
 								"description": "Complete, self-contained instructions for the executor.",
+							},
+							"kind": map[string]any{
+								"type": "string",
+								"enum": []string{"ship", "scout"},
+								"description": "\"ship\" (default) delivers file changes. \"scout\" is " +
+									"investigation/audit/planning only: its file changes are discarded and its " +
+									"findings are saved as a report — use it for research so no merge machinery runs.",
 							},
 						},
 						"required": []string{"subtask"},

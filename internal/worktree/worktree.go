@@ -91,6 +91,14 @@ func (t *Tree) MergeInto() error {
 	return nil
 }
 
+// Discard throws away all uncommitted changes in the worktree (reset --hard +
+// clean -fd, deliberately without -x so cached build artifacts survive). Used
+// after scout tasks, whose file changes are incidental by contract.
+func (t *Tree) Discard() {
+	_, _ = git(t.Path, "reset", "--hard")
+	_, _ = git(t.Path, "clean", "-fd")
+}
+
 // Remove deletes the worktree directory and its registration. If keepBranch is
 // false the branch is deleted too (use false after a successful merge).
 func (t *Tree) Remove(keepBranch bool) {
