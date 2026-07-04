@@ -104,6 +104,7 @@ type model struct {
 	nudges       int  // auto-continue count since the last user message
 	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
 	budgetWarned bool // already warned at 80% of the budget cap this session
+	quitArmed    bool // first ctrl+c pressed while a task was running
 
 	pendingCfg config.Config // last config we tried to switch to (avoid re-verifying)
 
@@ -599,6 +600,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.running = false
 		m.cancel = nil
+		m.quitArmed = false
 		// A finished/cancelled run can leave queued approvals nobody is
 		// waiting on (the gated calls unblocked via ctx.Done). Drop them.
 		if len(m.approvals) > 0 {
@@ -757,6 +759,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "ctrl+c":
+			// Don't tear down mid-run on a single keypress: agents may hold
+			// work that only lands at the merge boundary.
+			if m.running && !m.quitArmed {
+				m.quitArmed = true
+				m.footer = "a task is running — ctrl+c again to quit anyway (esc cancels the task first)"
+				return m, nil
+			}
 			(&m).saveHistory()
 			return m, tea.Quit
 		case "esc":

@@ -72,3 +72,25 @@ func TestRosterCostAware(t *testing.T) {
 		t.Fatal("project budget not shown")
 	}
 }
+
+func TestResolveExecutor(t *testing.T) {
+	known := map[string]execRuntime{"a": {}, "b": {}}
+	// No rules: unknown/empty falls back.
+	if ex, err := resolveExecutor("", known, "a", false); err != nil || ex != "a" {
+		t.Fatalf("%q %v", ex, err)
+	}
+	if ex, err := resolveExecutor("nope", known, "a", false); err != nil || ex != "a" {
+		t.Fatalf("%q %v", ex, err)
+	}
+	// Known name always resolves.
+	if ex, err := resolveExecutor("b", known, "a", true); err != nil || ex != "b" {
+		t.Fatalf("%q %v", ex, err)
+	}
+	// Rules active: silence and typos are rejected, not defaulted.
+	if _, err := resolveExecutor("", known, "a", true); err == nil {
+		t.Fatal("empty executor must be rejected under rules")
+	}
+	if _, err := resolveExecutor("typo", known, "a", true); err == nil {
+		t.Fatal("unknown executor must be rejected under rules")
+	}
+}

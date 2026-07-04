@@ -21,6 +21,7 @@ import (
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/dispatch"
 	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/project"
@@ -408,6 +409,17 @@ const lessonHint = "\n\nLessons: when the user corrects you about how this proje
 	"convention, a command, a gotcha), call record_lesson with one concise sentence so the " +
 	"correction becomes durable project memory instead of a repeat mistake."
 
+// liaisonRules govern how results are reported to the user: outcomes in the
+// user's language, never internal machinery. Ported from firstmate §9.
+const liaisonRules = "\n\nReporting: you are the user's single point of contact — talk in OUTCOMES, " +
+	"not mechanics. Never surface internal vocabulary in your replies: executor names, escalation, " +
+	"worktrees, branches (unless work is stranded on one the user must act on), subtask ids, token " +
+	"budgets, or tool names. Translate: 'the tests now pass' beats 'the executor completed the " +
+	"subtask'. Always give full URLs (https://…), never bare #numbers or shorthand. Report failures " +
+	"plainly and first — what failed, why, the evidence, and your proposed next step — never buried " +
+	"under successes, never dressed up. Don't narrate routine progress; report when something is " +
+	"done, blocked, or needs a decision only the user can make."
+
 // skillHint nudges the planner to consult skills when any exist.
 func skillHint(skillTools []core.Tool) string {
 	if len(skillTools) == 0 {
@@ -415,6 +427,22 @@ func skillHint(skillTools []core.Tool) string {
 	}
 	return "\n\nSkills: project knowledge files are available — call list_skills to see them and " +
 		"use_skill(name) to load one before relevant work; fold what you learn into the subtasks you delegate."
+}
+
+// resolveExecutor picks the executor for a delegated task. With routing rules
+// active an explicit, known executor is required (the rules must not be
+// silently skipped); otherwise unknown/empty names fall back to def.
+func resolveExecutor(name string, known map[string]execRuntime, def string, rulesActive bool) (string, error) {
+	if _, ok := known[name]; ok {
+		return name, nil
+	}
+	if rulesActive {
+		if name == "" {
+			return "", fmt.Errorf(`routing rules are in force — set "executor" explicitly per the rules`)
+		}
+		return "", fmt.Errorf("unknown executor %q — pick one from the roster per the routing rules", name)
+	}
+	return def, nil
 }
 
 // escalateTarget returns the cheapest still-untried, usable executor strictly
@@ -505,7 +533,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		soloTools = append(soloTools, configtools.Tools()...)
 		soloTools = append(soloTools, skillTools...)
 		soloTools = append(soloTools, project.LessonTool(workdir))
-		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools)+lessonHint+projBlock,
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools)+lessonHint+liaisonRules+projBlock,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		return solo, nil
@@ -559,6 +587,14 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	var reviewerFn func(context.Context, string, string) (validate.Verdict, error)
 	if validationOn && !cfg.Validation.SkipReview {
 		reviewerFn = NewReviewer(cfg, onEvent)
+	}
+
+	// Natural-language routing rules (the LLM matches; delegate() enforces
+	// only that a choice was made while rules exist).
+	home, _ := config.Home()
+	rules, rerr := dispatch.Load(workdir, home)
+	if rerr != nil {
+		onEvent(core.Event{Agent: "cheep", Type: "status", Status: "dispatch rules ignored: " + rerr.Error()})
 	}
 
 	// Cheap-first escalation: order executors by cost so a failed subtask can be
@@ -680,10 +716,11 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			m, _ := rt.(map[string]any)
 			ex, _ := m["executor"].(string)
 			st, _ := m["subtask"].(string)
-			if _, ok := runtimes[ex]; !ok {
-				ex = defaultExec // unknown/empty name falls back to the first executor
+			resolved, err := resolveExecutor(ex, runtimes, defaultExec, rules.Active())
+			if err != nil {
+				return fmt.Sprintf("ERROR: task %d: %v", i+1, err)
 			}
-			jobs[i] = job{executor: ex, subtask: st}
+			jobs[i] = job{executor: resolved, subtask: st}
 		}
 
 		results := make([]map[string]any, len(jobs))
@@ -855,7 +892,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		}
 	}
 	skillTools := skills.Tools(workdir)
-	system += skillHint(skillTools) + lessonHint + projBlock
+	system += rules.PromptBlock() + skillHint(skillTools) + lessonHint + liaisonRules + projBlock
 	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
