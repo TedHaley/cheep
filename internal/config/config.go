@@ -62,6 +62,11 @@ type Config struct {
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
 
+	// Delivery is how validated worktree changes land: "merge" (default) merges
+	// them into the local checkout; "pr" pushes each subtask branch and opens a
+	// pull request with the gh CLI instead.
+	Delivery string `json:"delivery,omitempty"`
+
 	// ApprovalMode gates risky tool calls in the shared workspace:
 	// "yolo" (nothing), "auto" (file writes ask; default), "approve"
 	// (writes and shell commands ask). Worktree work is never gated.

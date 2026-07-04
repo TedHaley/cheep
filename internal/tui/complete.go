@@ -29,6 +29,7 @@ var slashCmds = []slashCmd{
 	{"/status", "show current setup"},
 	{"/tokens", "token usage + estimated $ per model"},
 	{"/budget", "set a session $ cap"},
+	{"/delivery", "how validated work lands: merge | pr"},
 	{"/history", "browse and resume past conversations"},
 	{"/resume", "browse and resume past conversations"},
 	{"/fork", "branch this conversation from an earlier turn"},

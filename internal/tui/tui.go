@@ -1060,6 +1060,32 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		} else {
 			m.footer = "orchestrator now on " + f[1]
 		}
+	case "/delivery":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			mode := m.cfg.Delivery
+			if mode == "" {
+				mode = "merge"
+			}
+			m.footer = "delivery: " + mode + " — /delivery merge|pr switches how validated work lands"
+			return m, nil
+		}
+		switch f[1] {
+		case "merge", "pr":
+			m.cfg.Delivery = f[1]
+			if f[1] == "merge" {
+				m.cfg.Delivery = "" // default, keep config.json clean
+			}
+			_ = config.Save(m.cfg)
+			(&m).rebuild(true)
+			if f[1] == "pr" {
+				m.footer = "delivery: pr — validated subtask branches are pushed and opened as PRs (needs git remote + gh)"
+			} else {
+				m.footer = "delivery: merge — validated subtask branches merge into the local checkout"
+			}
+		default:
+			m.footer = "usage: /delivery merge|pr"
+		}
 	case "/budget":
 		f := strings.Fields(text)
 		switch {

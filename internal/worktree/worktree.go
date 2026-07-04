@@ -99,6 +99,26 @@ func (t *Tree) Discard() {
 	_, _ = git(t.Path, "clean", "-fd")
 }
 
+// PushAndPR pushes the worktree's branch to origin and opens a pull request
+// with the gh CLI. Returns the PR URL.
+func (t *Tree) PushAndPR(title, body string) (string, error) {
+	if _, err := git(t.Repo, "push", "-u", "origin", t.Branch); err != nil {
+		return "", fmt.Errorf("push: %w", err)
+	}
+	cmd := exec.Command("gh", "pr", "create", "--head", t.Branch, "--title", title, "--body", body)
+	cmd.Dir = t.Repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr create: %s", strings.TrimSpace(string(out)))
+	}
+	// gh prints the PR URL as the last line.
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) > 0 {
+		return lines[len(lines)-1], nil
+	}
+	return "", nil
+}
+
 // Remove deletes the worktree directory and its registration. If keepBranch is
 // false the branch is deleted too (use false after a successful merge).
 func (t *Tree) Remove(keepBranch bool) {

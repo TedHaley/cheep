@@ -180,6 +180,7 @@ func (m model) viewHelp() string {
 		"  /history /resume browse and resume past conversations",
 		"  /fork /tree      branch from an earlier turn / navigate the session tree",
 		"  /prompts         list /name prompt templates (.cheep/prompts, ~/.cheep/prompts)",
+		"  /delivery        how validated work lands: merge (local) | pr (push + gh pr)",
 		"  /model           show or switch the orchestrator model mid-session",
 		"  /approval        gate risky tool calls: yolo | auto | approve",
 		"  /clear           reset the conversation",

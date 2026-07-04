@@ -415,6 +415,9 @@ func batchNote(subtasks []string, results []map[string]any) string {
 		if rep, ok := r["report"].(string); ok && rep != "" {
 			fmt.Fprintf(&b, "  - report: %s\n", rep)
 		}
+		if pr, ok := r["pr"].(string); ok && pr != "" {
+			fmt.Fprintf(&b, "  - pr: %s\n", pr)
+		}
 	}
 	return b.String()
 }
@@ -729,6 +732,8 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		Func: iterateUntil,
 	}
 
+	delivery := cfg.Delivery
+
 	delegate := func(ctx context.Context, args map[string]any) string {
 		rawTasks, _ := args["tasks"].([]any)
 		if len(rawTasks) == 0 {
@@ -870,6 +875,18 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 					case !passed:
 						res["integration"] = "failed validation (work kept on branch " + tree.Branch + ")"
 						release(tree, false)
+					case delivery == "pr":
+						title := clip(strings.ReplaceAll(strings.TrimSpace(j.subtask), "\n", " "), 70)
+						body := "Delegated subtask:\n\n" + clip(j.subtask, 2000) +
+							"\n\n---\nOpened by cheep (executor: " + rt.name + ", validated pre-merge)."
+						if url, prErr := tree.PushAndPR("cheep: "+title, body); prErr != nil {
+							res["integration"] = "pr failed: " + prErr.Error() + " (work kept on branch " + tree.Branch + ")"
+							release(tree, false)
+						} else {
+							res["integration"] = "pull request opened"
+							res["pr"] = url
+							release(tree, true)
+						}
 					default:
 						if mErr := tree.MergeInto(); mErr != nil {
 							res["integration"] = mErr.Error() + " (kept on branch " + tree.Branch + ")"
@@ -940,6 +957,11 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +
 			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
 			"follow-up subtask (or resolve it yourself with git) before continuing."
+		if delivery := cfg.Delivery; delivery == "pr" {
+			system += "\n\nDelivery is PR mode: validated ship subtasks are NOT merged locally — each " +
+				"branch is pushed and opened as a pull request (the result's \"pr\" field has the URL). " +
+				"Give the user the PR URLs; the local checkout is not modified."
+		}
 		if validationOn {
 			system += "\n\nValidation is ON: before any merge, the project's declared checks run in the " +
 				"subtask's worktree and a fresh-context reviewer judges the diff, with bounded automatic " +
