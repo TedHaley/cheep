@@ -62,6 +62,12 @@ type Config struct {
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
 
+	// PiExtensions are pi coding-agent extensions (https://pi.dev) to run via
+	// the bundled Node bridge: npm package names installed with `cheep pi add`,
+	// or local paths. Their registered tools join the agents' tool set like any
+	// MCP server's.
+	PiExtensions []string `json:"pi_extensions,omitempty"`
+
 	// Delivery is how validated worktree changes land: "merge" (default) merges
 	// them into the local checkout; "pr" pushes each subtask branch and opens a
 	// pull request with the gh CLI instead.
