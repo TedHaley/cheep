@@ -52,6 +52,7 @@ const bannerArt = ` ██████╗██╗  ██╗██████�
 
 type evMsg core.Event
 type doneMsg struct{ r agent.RunResult }
+type suggestionsMsg struct{ sug []string }
 type switchMsg struct {
 	cfg config.Config
 	ok  bool
@@ -162,7 +163,8 @@ type model struct {
 	jobsList   []jobs.Job // /scheduled overlay rows
 	jobsCursor int
 
-	suggestions []string // next-step chips parsed from the last reply (1–N to use)
+	suggestions   []string           // next-step chips parsed from the last reply (1–N to use)
+	suggestCancel context.CancelFunc // aborts an in-flight async suggestion call
 }
 
 var (
@@ -213,6 +215,50 @@ func splitSuggestions(text string) (string, []string) {
 		break // sentinel is only honored as the last non-empty line
 	}
 	return text, nil
+}
+
+// suggestCmd generates next-step suggestions async on the cheapest executor
+// (local = free), for when the model didn't emit an inline [[NEXT]] line. It
+// never blocks the user; chips appear when it returns.
+func (m model) suggestCmd(ctx context.Context, reply string) tea.Cmd {
+	if m.cfg.SuggestOff || strings.TrimSpace(reply) == "" {
+		return nil
+	}
+	a := m.cfg.Orchestrator // cheapest agent, preferring free/local
+	for _, e := range m.cfg.Executors {
+		if pricing.Score(e) < pricing.Score(a) {
+			a = e
+		}
+	}
+	// Generous max_tokens: reasoning models burn budget thinking before they
+	// emit the answer, so a small cap yields empty content.
+	prov := provider.For(a.Provider, a.Endpoint, a.APIKey, 2048)
+	model := a.Model
+	reply = short(reply, 1500)
+	return func() tea.Msg {
+		sys := "You propose next steps. Given the assistant's last reply to the user, output up to 3 " +
+			"SHORT next-step actions the user could take, each 3–7 words, imperative (e.g. 'run the tests', " +
+			"'ship it as a PR'). Output ONLY the actions separated by ' | ' and nothing else. If no useful " +
+			"next step exists, output exactly: NONE"
+		turn, err := prov.Complete(ctx, model, sys, []core.Message{{Role: "user", Text: "Assistant's last reply:\n" + reply}}, nil)
+		if err != nil {
+			return suggestionsMsg{nil}
+		}
+		txt := strings.TrimSpace(turn.Message.Text)
+		if txt == "" || strings.EqualFold(txt, "NONE") {
+			return suggestionsMsg{nil}
+		}
+		var sug []string
+		for _, s := range strings.Split(txt, "|") {
+			if s = strings.TrimSpace(s); s != "" && !strings.EqualFold(s, "NONE") {
+				sug = append(sug, s)
+			}
+		}
+		if len(sug) > 3 {
+			sug = sug[:3]
+		}
+		return suggestionsMsg{sug}
+	}
 }
 
 // suggestionLines renders the next-step chips shown above the input.
@@ -844,7 +890,26 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.r.Status != "completed" {
 			mark = "⚠"
 		}
-		return m, tea.SetWindowTitle("cheep " + mark + " " + msg.r.Status + " — " + filepath.Base(m.workdir))
+		cmds := []tea.Cmd{tea.SetWindowTitle("cheep " + mark + " " + msg.r.Status + " — " + filepath.Base(m.workdir))}
+		// If the reply didn't carry inline [[NEXT]] suggestions (many models
+		// ignore that), generate them async on the cheapest executor.
+		if msg.r.Status == "completed" && !m.cfg.SuggestOff && len(m.suggestions) == 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			m.suggestCancel = cancel
+			if sc := m.suggestCmd(ctx, msg.r.Output); sc != nil {
+				cmds = append(cmds, sc)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case suggestionsMsg:
+		// Async next-step suggestions arrived; show them only if we're idle and
+		// nothing (inline sentinel or a newer turn) already set/cleared them.
+		if !m.running && len(m.suggestions) == 0 && len(msg.sug) > 0 {
+			m.suggestions = msg.sug
+			(&m).syncViewport()
+		}
+		return m, nil
 
 	case ovDoneMsg:
 		m.ovBusy = false
@@ -1188,6 +1253,10 @@ func (m model) startTask(text string) (tea.Model, tea.Cmd) {
 // runMessage sends text to the orchestrator, showing `display` in the log.
 func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 	m.suggestions = nil // last turn's suggestions are stale once we act
+	if m.suggestCancel != nil {
+		m.suggestCancel() // free the endpoint from any in-flight suggestion call
+		m.suggestCancel = nil
+	}
 	(&m).appendLine(0, display)
 	m.tabs[0].status = "run"
 	m.active = 0
