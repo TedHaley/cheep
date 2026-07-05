@@ -305,8 +305,22 @@ func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, lab
 		scancel()
 		e.onEvent(core.Event{Agent: label, Type: "status",
 			Status: fmt.Sprintf("resuming after %s (attempt %d/%d)", r.Status, attempt+1, e.maxResumes)})
-		task = subtask + "\n\nA previous attempt was interrupted (" + r.Status + ").\n" +
-			"Progress so far:\n" + summary + "\n\nContinue from where it left off and finish the task."
+		if r.Status == "looping" {
+			// A loop means "continue" would just repeat the rut — push a
+			// different approach, and name what it kept doing when we know it.
+			stuck := ""
+			if r.Stuck != "" {
+				stuck = " It kept repeating this action: " + clip(strings.ReplaceAll(r.Stuck, "|", " "), 160) + "."
+			}
+			task = subtask + "\n\nA previous attempt GOT STUCK repeating the same action without making " +
+				"progress." + stuck + "\nProgress so far:\n" + summary + "\n\nDo NOT repeat that action. " +
+				"Try a DIFFERENT approach: a different tool or command, break the step into smaller pieces, " +
+				"re-check your assumptions (file paths, names, prior results), or verify the last result " +
+				"before continuing. Then finish the task."
+		} else {
+			task = subtask + "\n\nA previous attempt was interrupted (" + r.Status + ").\n" +
+				"Progress so far:\n" + summary + "\n\nContinue from where it left off and finish the task."
+		}
 	}
 	// Salvage: a "completed" run with no final text still has findings in its
 	// history — summarize them so the orchestrator gets something usable.

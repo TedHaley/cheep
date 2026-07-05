@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/TedHaley/cheep/internal/core"
@@ -153,5 +154,20 @@ func TestUnlimitedTurns(t *testing.T) {
 	}
 	if r.Turns != 4 {
 		t.Errorf("turns = %d, want 4", r.Turns)
+	}
+}
+
+// TestLoopingReportsStuckCall: a looping run must report the repeated call so
+// the orchestrator can re-prompt with a different approach.
+func TestLoopingReportsStuckCall(t *testing.T) {
+	tools := []core.Tool{{Name: "spin", Func: func(context.Context, map[string]any) string { return "x" }}}
+	loop := toolCallTurn("spin", map[string]any{"a": 1.0})
+	p := &scriptProvider{turns: []core.Turn{loop, loop, loop, loop}}
+	r := New("t", p, "m", "sys", tools, 10, 0, nil).Run("go")
+	if r.Status != "looping" {
+		t.Fatalf("status = %q, want looping", r.Status)
+	}
+	if r.Stuck == "" || !strings.Contains(r.Stuck, "spin") {
+		t.Errorf("Stuck should name the repeated call, got %q", r.Stuck)
 	}
 }

@@ -24,6 +24,7 @@ type RunResult struct {
 	Status       string
 	Output       string
 	Summary      string // handoff summary, set when a run is cut short and summarized
+	Stuck        string // the repeated tool call, when Status=="looping" (for a smarter re-prompt)
 	Turns        int
 	InputTokens  int
 	OutputTokens int
@@ -187,8 +188,12 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 
 		if status := detectStuck(recent, a.LoopWindow); status != "" {
 			a.emit(core.Event{Type: "status", Status: status})
-			return RunResult{Status: status, Output: msg.Text,
+			rr := RunResult{Status: status, Output: msg.Text,
 				Turns: turn, InputTokens: inTok, OutputTokens: outTok}
+			if status == "looping" && len(recent) > 0 {
+				rr.Stuck = recent[len(recent)-1] // the repeated call, for a smarter re-prompt
+			}
+			return rr
 		}
 	}
 
