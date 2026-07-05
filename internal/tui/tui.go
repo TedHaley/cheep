@@ -295,17 +295,19 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events, extraOrch, extraExec, firstRun)
-	// Inline by default (like Claude Code): the conversation prints into the
-	// terminal's own scrollback, so native scrolling and text selection just
-	// work and nothing translates wheel events into stray key presses. The
-	// full-screen tab-per-agent UI is the "tabs": true opt-in, where /mouse
-	// additionally opts into wheel capture.
+	// Full-screen tab-per-agent UI by default; "inline": true opts into
+	// Claude Code-style scrollback rendering instead. In full-screen, mouse
+	// capture is on so the wheel scrolls the focused tab (/mouse releases it
+	// for text selection), and the terminal's alternate-scroll translation is
+	// disabled so a released wheel can never spray arrow keys into the input.
 	var opts []tea.ProgramOption
-	if cfg.Tabs {
+	if !cfg.Inline {
 		opts = append(opts, tea.WithAltScreen())
-		if cfg.Mouse {
+		if !cfg.MouseOff {
 			opts = append(opts, tea.WithMouseCellMotion())
 		}
+		os.Stdout.WriteString("\x1b[?1007l")       // no wheel→arrow translation
+		defer os.Stdout.WriteString("\x1b[?1007h") // restore the common default
 	}
 	p := tea.NewProgram(m, opts...)
 	go func() {
@@ -351,8 +353,8 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		extraOrch:  extraOrch,
 		extraExec:  extraExec,
 		keepTabs:   cfg.KeepTabs,
-		mouseOn:    cfg.Mouse,
-		inline:     !cfg.Tabs,
+		mouseOn:    !cfg.MouseOff,
+		inline:     cfg.Inline,
 		follow:     true,
 		onEvent: func(e core.Event) {
 			select {
@@ -1144,14 +1146,14 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		}
 	case "/mouse":
 		if m.inline {
-			m.footer = "inline mode: native scrolling & selection are always on — /mouse only applies to the tab UI (\"tabs\": true in config)"
+			m.footer = "inline mode: native scrolling & selection are always on — /mouse only applies to the full-screen UI"
 			return m, nil
 		}
 		m.mouseOn = !m.mouseOn
-		m.cfg.Mouse = m.mouseOn
+		m.cfg.MouseOff = !m.mouseOn
 		_ = config.Save(m.cfg) // sticky across sessions
 		if m.mouseOn {
-			m.footer = "mouse capture ON (saved) — wheel scrolls tabs; hold Option/Shift to select text"
+			m.footer = "mouse capture ON (saved) — wheel scrolls tabs; hold Option/Shift to select text, or /copy"
 			return m, tea.EnableMouseCellMotion
 		}
 		m.footer = "mouse capture OFF (saved) — select/copy text normally; scroll with pgup/pgdn"

@@ -201,19 +201,21 @@ The interactive shell has three modes, switchable mid-conversation (your history
 Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵⏵ auto`,
 `⏸ plan`, `⏵ chat`, `∞ loop`). Or use `/chat` `/plan` `/auto` `/loop` / `/mode`.
 
-### Inline by default; agent tabs opt-in
+### Full-screen agent tabs (default) — or inline
 
-By default cheep renders **inline** (like Claude Code): the conversation prints into your
-terminal's own scrollback, so native scrolling, native text selection/copy, and search all
-just work — no mouse capture, no alt screen, executor output interleaved with a dim
-`⟨name#1⟩` prefix. A persistent status line shows the mode, context gauge, and **token
-counter** (orchestrator vs executor usage, local tokens flagged free).
+cheep runs as a full-screen shell with a **tab per agent**: the orchestrator plus one for
+each executor it spawns, with live status glyphs (`●` `✓` `⚠` `✗`). **Tab**/`Ctrl+←/→`
+switch agents, the wheel or `PgUp/PgDn` scrolls, `/keeptabs` and `Ctrl+W`//`/close` manage
+tabs, and a persistent status line shows the mode, context gauge, and **token counter**
+(orchestrator vs executor usage, local tokens flagged free). Copying text: `/copy` grabs the
+last reply, `/mouse` releases the wheel so drag-select works (sticky; cheep disables the
+terminal's wheel→arrow-key translation so a released wheel never types junk), or hold
+Option/Shift while dragging.
 
-Prefer the full-screen **tab-per-agent** UI? Set `"tabs": true` in config.json: one tab per
-executor with live status glyphs (`●` `✓` `⚠` `✗`), **Tab**/`Ctrl+←/→` to switch,
-`PgUp/PgDn` to scroll, `/keeptabs` and `Ctrl+W`//`/close` to manage tabs, and `/mouse` to
-opt into wheel-scroll capture. When stdin isn't a terminal (pipes/CI), cheep falls back to a
-simple line-based mode.
+Prefer Claude Code-style rendering? `"inline": true` in config.json prints the conversation
+into your terminal's own scrollback — native scrolling, selection, and ⌘F search, executor
+output interleaved with a dim `⟨name#1⟩` prefix. When stdin isn't a terminal (pipes/CI),
+cheep falls back to a simple line-based mode.
 
 ### Chat history & the session tree
 

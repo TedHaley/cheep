@@ -46,14 +46,15 @@ type Config struct {
 	MCP          map[string]mcp.Server `json:"mcp,omitempty"` // name -> MCP server
 	KeepTabs     bool                  `json:"keep_tabs,omitempty"`
 
-	// Mouse opts into mouse capture (wheel/trackpad scrolls the focused tab).
-	// Only meaningful with Tabs; inline mode always leaves the mouse native.
-	Mouse bool `json:"mouse,omitempty"`
+	// MouseOff releases mouse capture in the full-screen UI so terminal-native
+	// text selection works (scroll with PgUp/PgDn). Default: capture on, the
+	// wheel scrolls the focused tab. Toggle live (and persist) with /mouse.
+	MouseOff bool `json:"mouse_off,omitempty"`
 
-	// Tabs opts into the full-screen tab-per-agent UI (the pre-inline
-	// behavior). Default off: cheep renders inline, chat lives in the
-	// terminal's own scrollback, and native scrolling/selection just work.
-	Tabs bool `json:"tabs,omitempty"`
+	// Inline opts out of the full-screen tab UI: the conversation prints into
+	// the terminal's own scrollback (Claude Code style) with native scrolling
+	// and selection, executor output prefixed instead of tabbed.
+	Inline bool `json:"inline,omitempty"`
 
 	// DisableEscalate turns off cheap-first escalation (retrying a failed subtask
 	// on a more capable executor). Escalation is on by default.
