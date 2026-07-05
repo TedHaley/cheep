@@ -429,9 +429,9 @@
         checkout untouched, safe on shared repos.</p>
       </div>
       <div class="cell wide" data-reveal>
-        <h3><span class="glyph" style="color:var(--magenta)">✦</span> Use your Claude Max plan <span class="pill">NEW</span></h3>
+        <h3><span class="glyph" style="color:var(--magenta)">✦</span> Use your Claude subscription <span class="pill">NEW</span></h3>
         <p>No API key? A bundled bridge routes hard reasoning through your logged-in Claude Code
-        (Max/Pro) — or run Claude Code as the driver and let it offload bulk work to cheep's
+        (any Pro or Max plan — no API key) — or run Claude Code as the driver and let it offload bulk work to cheep's
         free local executors via <code>cheep run</code>.</p>
       </div>
       <div class="cell wide" data-reveal>
@@ -576,21 +576,22 @@ Review the $1 package. Focus: $ARGUMENTS
 <span class="out"># baseline 61% → 74% → 88% ✓ (stops at target)</span></code></pre>
       </div>
       <div class="case" data-reveal>
-        <h3><span class="n">11</span>Use your Claude Max plan — no API key</h3>
-        <p>The bundled bridge shells out to your logged-in Claude Code, so a local orchestrator
+        <h3><span class="n">11</span>Use your Claude subscription — no API key</h3>
+        <p>The bundled bridge shells out to your logged-in Claude Code — whatever it's signed into,
+        any Pro or Max plan — so a local orchestrator
         can hand the hard reasoning to Claude on your subscription. (Experimental; subject to
         Anthropic's usage policy.)</p>
         <pre><code>"mcp": { <span class="k">"claude"</span>: {
     "command": "cheep-claude-mcp",
     "roles": ["orchestrator"] } }
 <span class="out"># orchestrator gains claude__ask_claude —</span>
-<span class="out"># hard bits run on Max, grunt work stays local</span></code></pre>
+<span class="out"># hard bits run on your plan, grunt work stays local</span></code></pre>
       </div>
       <div class="case" data-reveal>
         <h3><span class="n">12</span>Or let Claude Code drive cheep</h3>
-        <p>The cleaner direction: Claude Code (your Max plan) plans and reviews; it offloads the
+        <p>The cleaner direction: Claude Code (your Pro/Max plan) plans and reviews; it offloads the
         bulk implementation to cheep's free local executors via <code>cheep run</code>.</p>
-        <pre><code><span class="out"># in Claude Code, on your Max plan:</span>
+        <pre><code><span class="out"># in Claude Code, on your Pro/Max plan:</span>
 <span class="u">› build the appointments module</span>
 <span class="out"># Claude delegates the grunt work →</span>
 $ cheep run "write the routes + tests
