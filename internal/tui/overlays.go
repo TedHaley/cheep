@@ -182,6 +182,7 @@ func (m model) viewHelp() string {
 		"  /prompts         list /name prompt templates (.cheep/prompts, ~/.cheep/prompts)",
 		"  /delivery        how validated work lands: merge (local) | pr (push + gh pr)",
 		"  /stow            sweep lessons + a handoff note to disk before /clear",
+		"  /copy /mouse     copy the last reply · release the mouse to select text",
 		"  /model           show or switch the orchestrator model mid-session",
 		"  /approval        gate risky tool calls: yolo | auto | approve",
 		"  /nomistakes      strictest safety: gates everything, merges need your sign-off",

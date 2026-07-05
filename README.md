@@ -181,7 +181,9 @@ and resume past conversations) · `/fork` (branch the conversation from an earli
 (sweep lessons + a handoff note to disk before a reset) · `/delivery` (how validated work
 lands: `merge` or `pr`) · `/tokens` (tokens **and estimated $** per model, with local
 savings) · `/status` (current setup) · `/keeptabs` (toggle auto-closing finished executor
-tabs) · `/close` or `Ctrl+W` (close the focused executor tab) · `/clear` · `/help` · `/exit`.
+tabs) · `/copy` (copy the last reply to the clipboard) · `/mouse` (release the mouse so
+text selects normally) · `/close` or `Ctrl+W` (close the focused executor tab) · `/clear` ·
+`/help` · `/exit`.
 
 ### Modes
 

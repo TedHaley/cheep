@@ -104,6 +104,7 @@ type model struct {
 	openTodos    int  // non-done todos from the orchestrator's latest update_todos
 	delegated    bool // did the orchestrator call delegate this run?
 	stowing      bool // current run is a /stow; capture its reply as a run note
+	mouseOff     bool // mouse tracking released so the terminal can select/copy text
 	nudges       int  // auto-continue count since the last user message
 	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
 	budgetWarned bool // already warned at 80% of the budget cap this session
@@ -1051,6 +1052,34 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 			m.footer = "can't close the orchestrator tab"
 		} else {
 			(&m).closeTab(m.active)
+		}
+	case "/mouse":
+		m.mouseOff = !m.mouseOff
+		if m.mouseOff {
+			m.footer = "mouse OFF — select/copy text normally; scroll with pgup/pgdn · /mouse to re-enable"
+			return m, tea.DisableMouse
+		}
+		m.footer = "mouse ON — wheel scrolls tabs (hold Option/Shift to select text)"
+		return m, tea.EnableMouseCellMotion
+	case "/copy":
+		if m.session == nil {
+			m.footer = "nothing to copy yet"
+			return m, nil
+		}
+		text := ""
+		for _, msg := range m.session.History() {
+			if msg.Role == "assistant" && strings.TrimSpace(msg.Text) != "" {
+				text = msg.Text
+			}
+		}
+		if text == "" {
+			m.footer = "no reply to copy yet"
+			return m, nil
+		}
+		if err := clipboardCopy(text); err != nil {
+			m.footer = "copy failed: " + err.Error()
+		} else {
+			m.footer = fmt.Sprintf("copied the last reply (%d chars) to the clipboard", len(text))
 		}
 	case "/keeptabs":
 		m.keepTabs = !m.keepTabs

@@ -35,6 +35,8 @@ var slashCmds = []slashCmd{
 	{"/resume", "browse and resume past conversations"},
 	{"/fork", "branch this conversation from an earlier turn"},
 	{"/tree", "show the session tree (forks nested)"},
+	{"/copy", "copy the last reply to the clipboard"},
+	{"/mouse", "toggle mouse capture (off = select/copy text normally)"},
 	{"/keeptabs", "toggle auto-close of finished executor tabs"},
 	{"/close", "close the focused executor tab"},
 	{"/stow", "sweep lessons + handoff note to disk before a reset"},
