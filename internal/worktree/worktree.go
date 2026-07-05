@@ -83,8 +83,10 @@ func (t *Tree) CommitAll(msg string) (committed bool, err error) {
 // repo. On conflict it aborts the merge and returns an error; the branch is
 // left intact so the work is not lost.
 func (t *Tree) MergeInto() error {
-	if _, err := git(t.Repo, "merge", "--no-ff", "-m",
-		"cheep: merge "+t.Branch, t.Branch); err != nil {
+	// Identity flags match CommitAll: a merge commit needs a committer too,
+	// and bare environments (CI runners, fresh machines) have no git config.
+	if _, err := git(t.Repo, "-c", "user.name=cheep", "-c", "user.email=cheep@localhost",
+		"merge", "--no-ff", "-m", "cheep: merge "+t.Branch, t.Branch); err != nil {
 		_, _ = git(t.Repo, "merge", "--abort")
 		return fmt.Errorf("merge conflict on %s", t.Branch)
 	}
