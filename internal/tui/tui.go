@@ -98,6 +98,8 @@ type model struct {
 	queue   []string // messages typed while a task is running
 	footer  string
 
+	lastKeyAt time.Time // previous keypress time — sub-10ms Enters are paste bursts, not submits
+
 	inputHist []string // submitted inputs, for up/down recall
 	histIdx   int      // cursor into inputHist (== len means "current draft")
 	histDraft string   // the in-progress line saved when you start browsing history
@@ -854,6 +856,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
+		sincePrevKey := time.Since(m.lastKeyAt)
+		m.lastKeyAt = time.Now()
 		if m.overlay != "" {
 			return m.updateOverlay(msg)
 		}
@@ -957,6 +961,15 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.follow = m.vp.AtBottom()
 			return m, nil
 		case "enter":
+			// Terminals without bracketed paste replay a paste as keystrokes:
+			// every newline arrives as a real Enter, which would submit each
+			// line. Key events that close together can only be a paste —
+			// insert the newline instead (like Claude Code).
+			if sincePrevKey < 10*time.Millisecond {
+				m.input.InsertString("\n")
+				(&m).syncInputHeight()
+				return m, nil
+			}
 			return m.submit()
 		}
 		var cmd tea.Cmd
