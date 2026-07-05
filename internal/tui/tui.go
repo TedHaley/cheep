@@ -388,11 +388,20 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	// Surface delegations a previous cheep process left in flight (crash/kill):
 	// any work they produced survives on quarantined worktree branches.
 	for _, j := range inflight.Stale(workdir) {
-		line := errSt.Render("⚠ interrupted delegation") + hintSt.Render(" ("+j.Started.Local().Format("Jan 2 15:04")+
-			", "+j.Executor+"): "+short(strings.ReplaceAll(j.Subtask, "\n", " "), 80))
-		if j.Branch != "" {
-			line += hintSt.Render("  · partial work (if any) is on branch "+j.Branch) +
-				hintSt.Render("  · see `cheep worktree list`")
+		when := j.Started.Local().Format("Jan 2 15:04")
+		sub := short(strings.ReplaceAll(j.Subtask, "\n", " "), 80)
+		var line string
+		switch {
+		case j.Kind == "scout":
+			// A scout discards its changes by design — nothing is stranded, it
+			// just didn't finish. Informational, not alarming.
+			line = hintSt.Render("• interrupted research (" + when + ", " + j.Executor + "): " + sub + "  · re-run if you still need it")
+		case j.Branch != "":
+			line = errSt.Render("⚠ interrupted work") + hintSt.Render(" ("+when+", "+j.Executor+"): "+sub+
+				"  · partial work is on branch "+j.Branch+"  · see `cheep worktree list`")
+		default:
+			line = errSt.Render("⚠ interrupted work") + hintSt.Render(" ("+when+", "+j.Executor+"): "+sub+
+				"  · ran in the shared workspace — check `git status`")
 		}
 		m.tabs[0].lines = append(m.tabs[0].lines, line)
 	}
