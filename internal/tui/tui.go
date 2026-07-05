@@ -575,7 +575,7 @@ func welcomeLines(cfg config.Config, conn map[string]string) []string {
 	out := []string{""} // top space
 	out = append(out, strings.Split(header, "\n")...)
 	out = append(out, "",
-		hintSt.Render("Tips: shift+tab cycles modes · multi-agent delegation runs in AUTO mode · /help"), "")
+		hintSt.Render("Tips: tab / ⌥tab switches agents (watch executors, reviewer) · shift+tab cycles modes · /help"), "")
 	return out
 }
 
@@ -1911,6 +1911,12 @@ func (m model) tabBar() string {
 		}
 	}
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	// Once there's more than the orchestrator tab, surface how to reach the
+	// executor / reviewer tabs — the hotkey isn't otherwise discoverable.
+	if len(m.tabs) > 1 {
+		bar = lipgloss.JoinHorizontal(lipgloss.Top, bar,
+			hintSt.Render("   tab / ⌥tab: switch agents · ^W: close"))
+	}
 	return barSt.Width(m.w).Render(bar)
 }
 
