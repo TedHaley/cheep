@@ -147,23 +147,35 @@ func NextMode(m Mode) Mode {
 // goal-reached or plateau.
 const loopSystem = `
 
-LOOP MODE is ON — you optimize toward MEASURABLE goals, not one-shot tasks.
+LOOP MODE is ON — you work toward a GOAL, iterating until it's met or progress plateaus.
+A goal can be NUMERIC or a COVERAGE goal; pick the shape that fits and confirm it with the
+user (at most one short round of questions — propose one yourself when they're vague):
+
+  • NUMERIC — a shell command whose output is a number, a direction, and a target
+    (coverage %, test pass count, lint warnings, p95 latency, bundle bytes, ns/op).
+  • COVERAGE — "do X for every item in a set that isn't fully known up front"
+    (e.g. replicate every capability of a website, port every endpoint, cover every case).
+    Here the "metric" is items-remaining → 0. You MAINTAIN THE SET as a checklist file
+    (update_todos plus a tracked doc), because the set grows as you discover more.
+
 Protocol, in order:
-1. GOALS FIRST. Before any work: if the user's request lacks a measurable goal, ask for one
-   (at most one short round of questions). A goal needs (a) a METRIC — a shell command whose
-   output yields a number (test pass count, coverage %, lint warnings, p95 latency, bundle
-   bytes, benchmark ns/op) — (b) a DIRECTION (up/down), and (c) a TARGET (or "as far as you
-   can"). Propose concrete goals yourself when the user is vague; confirm, then start.
-2. BASELINE. Measure before changing anything and report the starting number.
-3. LOOP. Prefer the iterate_metric tool — it runs improve→measure rounds on a cheap executor
-   and stops itself on target-reached or plateau. For pass/fail goals use iterate_until. Only
-   loop by hand (delegate → measure → repeat) when a round needs judgment between iterations,
-   and then re-measure EVERY round.
-4. STOP conditions — the ONLY reasons to stop: the target is met, progress has plateaued
-   (two consecutive rounds without improvement), or the budget/user stops you. Do not stop
-   just because one round "seems good"; the metric decides, not vibes.
-5. REPORT the trajectory (baseline → each round → final), what moved the number most, and —
-   if plateaued short of target — the bottleneck you hit and what would unblock it.`
+1. AGREE ON THE GOAL and its done-definition (target number, or "the checklist is empty").
+2. BASELINE. Measure / enumerate what exists before changing anything; report it.
+3. LOOP one chunk at a time:
+   • NUMERIC → prefer iterate_metric (improve→measure rounds, auto-stops on target/plateau);
+     iterate_until for plain pass/fail.
+   • COVERAGE → each round: pick the next unfinished checklist item, delegate ONE narrow
+     self-contained subtask for it (sized to the executor's context window), verify it, mark
+     it done, and re-scan for newly discovered items. Executors are fresh each subtask and
+     save their own progress, so a big set survives across many small sessions.
+4. STOP only when: the target is met / the checklist is empty, progress has PLATEAUED (two
+   consecutive rounds add nothing done and nothing new discovered), or budget/user stops you.
+   Never stop because a round "seems good" — the goal decides, not vibes.
+5. REPORT the trajectory (baseline → rounds → final), what moved it most, and — if plateaued
+   short — the bottleneck and what would unblock it.
+
+If the WORK IS IN A DIFFERENT DIRECTORY than your workspace, don't fight the sandbox — tell
+the user to run /cd <path> (or relaunch there); your file tools are scoped to the workspace.`
 
 const orchestratorSystemTmpl = `You are the orchestrator. You coordinate a fleet of cheaper
 executor agents to accomplish the user's task. You are expensive; the executors are cheap.
@@ -226,6 +238,7 @@ type execRuntime struct {
 	provider   core.Provider
 	maxTurns   int
 	budget     int
+	compact    int // self-compaction trigger (executor context management)
 	timeout    time.Duration
 	maxResumes int
 	extra      []core.Tool
@@ -246,8 +259,13 @@ func (e execRuntime) newSession(workdir, label string) *agent.Session {
 		// AGENTS.md edits and freshly recorded lessons reach new sessions.
 		system += e.projectFn()
 	}
-	return agent.New(label, e.provider, e.model, system,
-		tools, e.maxTurns, e.budget, e.onEvent).NewSession()
+	a := agent.New(label, e.provider, e.model, system,
+		tools, e.maxTurns, e.budget, e.onEvent)
+	a.CompactBudget = e.compact // compress-and-continue instead of hard-stopping
+	a.CompactNote = func(sum string) {
+		history.AppendRunNote(e.root, "**"+label+" compacted mid-task — progress saved**\n\n"+sum)
+	}
+	return a.NewSession()
 }
 
 // runSupervised runs the subtask with a wall-clock timeout. If it ends short
@@ -321,12 +339,25 @@ func roster(execs []config.Agent, budget float64) string {
 	sort.SliceStable(sorted, func(i, j int) bool { return pricing.Score(sorted[i]) < pricing.Score(sorted[j]) })
 	var b strings.Builder
 	b.WriteString("Your executors, cheapest first (delegate to these by name):\n")
+	anySmall := false
 	for _, e := range sorted {
 		model := e.Model
 		if model == "" {
 			model = "unknown model"
 		}
-		fmt.Fprintf(&b, "  - %q runs %q  [%s]\n", e.Name, model, costTier(e))
+		ctx := ""
+		if e.ContextWindow > 0 {
+			ctx = fmt.Sprintf("  ~%dk ctx", e.ContextWindow/1000)
+			if e.ContextWindow < 32000 {
+				anySmall = true
+			}
+		}
+		fmt.Fprintf(&b, "  - %q runs %q  [%s]%s\n", e.Name, model, costTier(e), ctx)
+	}
+	if anySmall {
+		b.WriteString("Some executors have a SMALL context window (shown above). Size each subtask to fit: " +
+			"give one narrow, self-contained job per delegate, never \"read this whole site/repo\" — " +
+			"split by page/file/section so no single executor session overflows.\n")
 	}
 	if budget > 0 {
 		fmt.Fprintf(&b, "This project's budget is about $%.2f total — spend it deliberately.\n", budget)
@@ -631,6 +662,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			provider:   provider.For(e.Provider, e.Endpoint, e.APIKey, 4096),
 			maxTurns:   e.MaxTurns,
 			budget:     e.TokenBudget,
+			compact:    e.ContextBudget,
 			timeout:    time.Duration(e.TimeoutSeconds) * time.Second,
 			maxResumes: e.MaxResumes,
 			extra:      extraExec,

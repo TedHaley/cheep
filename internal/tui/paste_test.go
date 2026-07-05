@@ -146,3 +146,30 @@ func stripAnsi(s string) string {
 	}
 	return b.String()
 }
+
+// TestCdRescopesWorkspace: /cd points the agents at another directory.
+func TestCdRescopesWorkspace(t *testing.T) {
+	t.Setenv("CHEEP_HOME", t.TempDir())
+	cfg := config.Config{
+		Orchestrator: config.Agent{Provider: "openai", Endpoint: "http://127.0.0.1:1", Model: "m"},
+		Executors:    []config.Agent{{Name: "e1", Provider: "openai", Endpoint: "http://127.0.0.1:1", Model: "m"}},
+	}
+	cfg.ApplyDefaults()
+	start := t.TempDir()
+	m := newModel(cfg, start, make(chan core.Event, 8), nil, nil, false)
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = nm.(model)
+
+	dest := t.TempDir()
+	nm, _ = m.slash("/cd " + dest)
+	m = nm.(model)
+	if m.workdir != dest {
+		t.Fatalf("workdir = %q, want %q", m.workdir, dest)
+	}
+	// a non-existent target is refused, workspace unchanged
+	nm, _ = m.slash("/cd /no/such/dir/anywhere")
+	m = nm.(model)
+	if m.workdir != dest {
+		t.Fatalf("bad /cd changed workspace to %q", m.workdir)
+	}
+}

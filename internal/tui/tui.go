@@ -1245,6 +1245,35 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m.openFork()
 	case "/tree":
 		return m.openTree()
+	case "/cd":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			m.footer = "workspace: " + m.workdir + " — /cd <path> moves the agents to another directory"
+			return m, nil
+		}
+		target := strings.TrimSpace(strings.TrimPrefix(text, "/cd "))
+		if strings.HasPrefix(target, "~") {
+			if home, err := os.UserHomeDir(); err == nil {
+				target = home + strings.TrimPrefix(target, "~")
+			}
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(m.workdir, target)
+		}
+		target = filepath.Clean(target)
+		info, err := os.Stat(target)
+		if err != nil || !info.IsDir() {
+			m.footer = "can't cd there — no such directory: " + target
+			return m, nil
+		}
+		m.workdir = target
+		m.fileList = loadFileList(target)
+		(&m).rebuild(true) // re-scope tools, worktree pool, project instructions; keep the conversation
+		if m.inline {
+			m.pendingOut = append(m.pendingOut, hintSt.Render("⟳ workspace → "+target))
+		}
+		m.footer = "workspace → " + target
+		return m, tea.SetWindowTitle("cheep — " + filepath.Base(target))
 	case "/stow":
 		if m.session == nil || len(m.session.History()) == 0 {
 			m.footer = "nothing to stow yet"

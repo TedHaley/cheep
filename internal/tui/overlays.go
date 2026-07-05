@@ -182,6 +182,7 @@ func (m model) viewHelp() string {
 		"  /fork /tree      branch from an earlier turn / navigate the session tree",
 		"  /prompts         list /name prompt templates (.cheep/prompts, ~/.cheep/prompts)",
 		"  /delivery        how validated work lands: merge (local) | pr (push + gh pr)",
+		"  /cd <path>       move the agents to another workspace directory",
 		"  /stow            sweep lessons + a handoff note to disk before /clear",
 		"  /copy /mouse     copy the last reply · opt into wheel-scroll mouse capture",
 		"  /model           show or switch the orchestrator model mid-session",

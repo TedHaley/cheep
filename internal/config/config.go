@@ -26,8 +26,14 @@ type Agent struct {
 	MaxTurns    int    `json:"max_turns,omitempty"`
 	TokenBudget int    `json:"token_budget,omitempty"` // executor: stop a run past this many input tokens
 
-	// Orchestrator self-compaction: when its estimated context exceeds this many
-	// tokens, older history is summarized and replaced. 0 picks a default.
+	// ContextWindow is the model's real context size in tokens. When known it
+	// drives self-compaction (compact at ~75% of it) and per-agent context
+	// gauges, so a small local window never surprises the run. 0 = unknown.
+	ContextWindow int `json:"context_window,omitempty"`
+
+	// ContextBudget is the self-compaction trigger: when estimated context
+	// exceeds this many tokens, older history is summarized and replaced.
+	// 0 derives from ContextWindow (or a default). Applies to both roles.
 	ContextBudget int `json:"context_budget,omitempty"`
 
 	// Executor supervision.
@@ -317,7 +323,11 @@ func (c *Config) ApplyDefaults() {
 		o.MaxTurns = 30
 	}
 	if o.ContextBudget == 0 {
-		o.ContextBudget = 120000 // est. tokens; self-compaction trigger
+		if o.ContextWindow > 0 {
+			o.ContextBudget = o.ContextWindow * 3 / 4
+		} else {
+			o.ContextBudget = 120000 // est. tokens; self-compaction trigger
+		}
 	}
 	if o.Provider == "anthropic" && o.APIKey == "" {
 		o.APIKey = os.Getenv("ANTHROPIC_API_KEY")
@@ -329,6 +339,16 @@ func (c *Config) ApplyDefaults() {
 		}
 		if e.MaxTurns == 0 {
 			e.MaxTurns = 20
+		}
+		// Self-compact well before the window so a chunk gets summarized and
+		// continued instead of dying; keep the hard stop just under the window.
+		if e.ContextWindow > 0 {
+			if e.ContextBudget == 0 {
+				e.ContextBudget = e.ContextWindow * 3 / 4
+			}
+			if e.TokenBudget == 0 {
+				e.TokenBudget = e.ContextWindow * 95 / 100
+			}
 		}
 		if e.TokenBudget == 0 {
 			e.TokenBudget = 100000

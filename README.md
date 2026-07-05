@@ -192,11 +192,13 @@ The interactive shell has three modes, switchable mid-conversation (your history
 - **chat** — talk only, no tools, no changes.
 - **plan** — read-only investigation; produces a step-by-step plan for you to approve.
 - **auto** — full autonomy: plan, delegate to executors, edit, and verify (the default).
-- **loop** — auto with a goal: agree on a **measurable target** first (a shell command whose
-  output is a number — coverage %, benchmark time, lint count — plus a direction and target),
-  then iterate until it's met or progress **plateaus** (two rounds without improvement). The
-  metric decides when to stop, not vibes. Powered by the `iterate_metric` tool: improve →
-  measure rounds on a cheap executor, trajectory reported back.
+- **loop** — auto with a goal, iterating until it's met or progress **plateaus** (two rounds
+  without improvement — the goal decides when to stop, not vibes). The goal can be **numeric**
+  (a shell command whose output is a number — coverage %, benchmark time, lint count — plus a
+  direction and target; powered by `iterate_metric`) or a **coverage** goal ("do X for every
+  item in a set that isn't fully known up front" — e.g. replicate every capability of a site,
+  port every endpoint). For coverage, cheep maintains a growing checklist and works one narrow
+  chunk per round — sized to each executor's context window — until the list is empty.
 
 Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵⏵ auto`,
 `⏸ plan`, `⏵ chat`, `∞ loop`). Or use `/chat` `/plan` `/auto` `/loop` / `/mode`.
@@ -269,6 +271,29 @@ branches are quarantined, never recycled, until their work provably lands). `/st
 graceful version: before a `/clear` or a walk-away it records durable lessons via
 `record_lesson` and appends a structured handoff note (done / in flight / next steps) to
 `~/.cheep/history/notes.md`.
+
+### Working across directories
+
+cheep's file tools are scoped to the workspace (that's what makes worktree isolation real),
+so if you launch in one repo and ask it to work on another, `read_file`/`write_file` can't
+reach it. `/cd <path>` moves the whole session — tools, worktree pool, and project
+instructions — to another directory, keeping the conversation. (Or just launch cheep from
+the target repo.)
+
+### Per-model context windows
+
+Set `"context_window"` (tokens) on any agent and cheep sizes everything to fit: it
+self-compacts at ~75% of the window and hard-stops just under it, so a small local model
+**compresses and continues** mid-task instead of dying with `context_exhausted`. Each
+compaction is saved to `~/.cheep/history/notes.md`, and the orchestrator sees each
+executor's window in its roster — so it splits big jobs ("copy every capability of this
+site") into chunks that fit rather than overflowing one session.
+
+```json
+{ "name": "local-qwen", "provider": "openai",
+  "endpoint": "http://127.0.0.1:1234/v1", "model": "qwen/qwen3.6-35b-a3b",
+  "context_window": 8000 }
+```
 
 ### Context bar, auto-compression, and saved memories
 
