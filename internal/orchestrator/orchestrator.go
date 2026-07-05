@@ -434,6 +434,14 @@ func slimValidation(v validate.Result) validate.Result {
 	return v
 }
 
+// compactNote makes auto-compaction durable: the summary of the squeezed-out
+// context is appended to the run notes, so the "memory" survives compression.
+func compactNote(workdir string) func(string) {
+	return func(sum string) {
+		history.AppendRunNote(workdir, "**Auto-compacted context — memory saved**\n\n"+sum)
+	}
+}
+
 // lessonHint teaches the agent to persist corrections via record_lesson.
 const lessonHint = "\n\nLessons: when the user corrects you about how this project works (a " +
 	"convention, a command, a gotcha), call record_lesson with one concise sentence so the " +
@@ -566,6 +574,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools)+lessonHint+liaisonRules+projBlock,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
+		solo.CompactNote = compactNote(workdir)
 		return solo, nil
 	}
 
@@ -1014,5 +1023,6 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
 		cfg.Orchestrator.MaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget
+	orch.CompactNote = compactNote(workdir)
 	return orch, nil
 }

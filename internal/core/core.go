@@ -70,6 +70,7 @@ type Event struct {
 	Status string         `json:"status,omitempty"`
 	Turn   int            `json:"turn,omitempty"`          // progress: current turn
 	Tokens int            `json:"tokens,omitempty"`        // progress: cumulative input tokens
+	Ctx    int            `json:"ctx_tokens,omitempty"`    // progress: estimated conversation size (context fill)
 	Model  string         `json:"model,omitempty"`         // usage: the model that produced this turn
 	InTok  int            `json:"input_tokens,omitempty"`  // usage: input tokens this turn
 	OutTok int            `json:"output_tokens,omitempty"` // usage: output tokens this turn

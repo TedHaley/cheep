@@ -615,9 +615,25 @@ func cmdRun(argv []string) {
 	workdir := fs.String("workdir", ".", "workspace directory the agents operate in")
 	isolate := fs.Bool("isolate", true, "run each parallel subtask in its own git worktree (if workdir is a git repo)")
 	asJSON := fs.Bool("json", false, "emit JSONL events on stdout (human chrome goes to stderr)")
-	_ = fs.Parse(argv)
+	// Go's flag package stops at the first positional, but the documented
+	// shape is `cheep run "<task>" [--flags]` — so partition args ourselves.
+	var flags, positional []string
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if name == "workdir" && !strings.Contains(a, "=") && i+1 < len(argv) {
+				i++
+				flags = append(flags, argv[i])
+			}
+			continue
+		}
+		positional = append(positional, a)
+	}
+	_ = fs.Parse(flags)
 
-	task := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	task := strings.TrimSpace(strings.Join(positional, " "))
 	if task == "" {
 		fmt.Fprintln(os.Stderr, `cheep: no task provided — try: cheep run "fix the failing test"`)
 		os.Exit(2)

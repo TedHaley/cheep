@@ -115,6 +115,7 @@ type model struct {
 	connectivity map[string]string // label -> "ok"/"unreachable"/"needs API key"
 	welcomeLen   int               // length of the initial banner block (for refresh)
 
+	ctxTokens  int               // orchestrator conversation size estimate (context bar)
 	usage      map[string][2]int // model -> {input, output} tokens this session
 	usageOrder []string          // models in first-seen order
 	usageRole  map[string][2]int // "orchestrator"/"executor" -> {input, output}
@@ -666,6 +667,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		(&m).syncViewport()
 		(&m).saveHistory() // persist the conversation after every completed turn
+		if m.session != nil {
+			m.ctxTokens = agent.EstTokens(m.session.History())
+		}
 		// The orchestrator may have rewired cheep via the config tools. Verify the
 		// new orchestrator is reachable BEFORE switching to it (don't brick the
 		// session); applied in the switchMsg handler.
@@ -1102,6 +1106,7 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.histID = history.UniqueID(m.histStarted)
 		m.histTitle = ""
 		m.histParent, m.histForkAt = "", 0
+		m.ctxTokens = 0
 		m.footer = "(cleared)"
 		(&m).syncViewport()
 	case "/history", "/resume":
@@ -1238,6 +1243,11 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	case "/tokens":
 		for _, l := range m.tokenLines() {
 			m.appendLine(m.active, l)
+		}
+		if m.ctxTokens > 0 && m.cfg.Orchestrator.ContextBudget > 0 {
+			m.appendLine(m.active, hintSt.Render(fmt.Sprintf(
+				"  context: ~%s of %s est. tokens — auto-compacts at 100%%, squeezed-out memory saved to ~/.cheep/history/notes.md",
+				human(m.ctxTokens), human(m.cfg.Orchestrator.ContextBudget))))
 		}
 		m.follow = true
 		(&m).syncViewport()
@@ -1395,6 +1405,10 @@ func (m *model) applyEvent(e core.Event) {
 	idx := m.tabFor(e.Agent)
 	t := m.tabs[idx]
 	switch e.Type {
+	case "progress":
+		if idx == 0 && e.Ctx > 0 {
+			m.ctxTokens = e.Ctx
+		}
 	case "lifecycle":
 		if e.Status == "start" {
 			t.status = "run"
@@ -1498,7 +1512,15 @@ func (m model) View() string {
 	}
 	left := modeLabel(m.mode) + "   " + status
 	hint := left
-	if tok := hintSt.Render(m.tokenSummary()); tok != "" {
+	right := hintSt.Render(m.tokenSummary())
+	if cb := m.ctxBar(); cb != "" {
+		if right != "" {
+			right = cb + hintSt.Render("  ·  ") + right
+		} else {
+			right = cb
+		}
+	}
+	if tok := right; tok != "" {
 		gap := m.w - lipgloss.Width(left) - lipgloss.Width(tok)
 		if gap < 1 {
 			gap = 1
@@ -1698,6 +1720,30 @@ func (m model) spent() float64 {
 		}
 	}
 	return total
+}
+
+// ctxBar renders the orchestrator's context fill against its compaction
+// budget: green → yellow (60%) → red (85%); compaction fires at 100%.
+func (m model) ctxBar() string {
+	budget := m.cfg.Orchestrator.ContextBudget
+	if budget <= 0 || m.ctxTokens <= 0 {
+		return ""
+	}
+	ratio := float64(m.ctxTokens) / float64(budget)
+	if ratio > 1 {
+		ratio = 1
+	}
+	const cells = 8
+	filled := int(ratio*cells + .5)
+	st := okSt
+	switch {
+	case ratio >= .85:
+		st = errSt
+	case ratio >= .6:
+		st = todoProgSt
+	}
+	return hintSt.Render("ctx ") + st.Render(strings.Repeat("▰", filled)) +
+		hintSt.Render(strings.Repeat("▱", cells-filled)) + hintSt.Render(fmt.Sprintf(" %d%%", int(ratio*100)))
 }
 
 // tokenSummary is the compact persistent counter (e.g. "Σ orch 13k · exec 81k · $0.07").

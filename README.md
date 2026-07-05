@@ -259,6 +259,17 @@ graceful version: before a `/clear` or a walk-away it records durable lessons vi
 `record_lesson` and appends a structured handoff note (done / in flight / next steps) to
 `~/.cheep/history/notes.md`.
 
+### Context bar, auto-compression, and saved memories
+
+The status bar shows a live **context gauge** (`ctx ▰▰▰▱▱▱▱▱ 38%`) — how full the
+orchestrator's conversation is relative to its compaction budget (`context_budget`,
+default 120k est. tokens; green → yellow at 60% → red at 85%). At 100% cheep
+**auto-compresses**: older history is summarized in place, recent turns stay verbatim, and
+the squeezed-out summary is appended to `~/.cheep/history/notes.md` — compression never
+silently discards memory. If a model's real window is smaller than the budget (common with
+local models) and the server rejects a request as too long, cheep compacts aggressively in
+bounded chunks and retries automatically instead of failing the run.
+
 ### Reasoning effort per role
 
 Append `:low`, `:medium`, or `:high` to any model name (`"claude-sonnet-4-6:high"`,
