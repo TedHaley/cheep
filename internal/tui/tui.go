@@ -292,9 +292,14 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events, extraOrch, extraExec, firstRun)
-	// Mouse on for wheel/trackpad scrolling. (To select/copy text, hold Option on
-	// macOS or Shift elsewhere to bypass mouse tracking.)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Mouse on for wheel/trackpad scrolling — unless the user turned it off
+	// (/mouse) so terminal-native text selection works. With it on, hold
+	// Option (macOS) or Shift to select text without toggling.
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if !cfg.MouseOff {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	p := tea.NewProgram(m, opts...)
 	go func() {
 		for e := range events {
 			p.Send(evMsg(e))
@@ -338,6 +343,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		extraOrch:  extraOrch,
 		extraExec:  extraExec,
 		keepTabs:   cfg.KeepTabs,
+		mouseOff:   cfg.MouseOff,
 		follow:     true,
 		onEvent: func(e core.Event) {
 			select {
@@ -1059,11 +1065,13 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		}
 	case "/mouse":
 		m.mouseOff = !m.mouseOff
+		m.cfg.MouseOff = m.mouseOff
+		_ = config.Save(m.cfg) // sticky across sessions
 		if m.mouseOff {
-			m.footer = "mouse OFF — select/copy text normally; scroll with pgup/pgdn · /mouse to re-enable"
+			m.footer = "mouse OFF (saved) — select/copy text normally; scroll with pgup/pgdn · /mouse to re-enable"
 			return m, tea.DisableMouse
 		}
-		m.footer = "mouse ON — wheel scrolls tabs (hold Option/Shift to select text)"
+		m.footer = "mouse ON (saved) — wheel scrolls tabs (hold Option/Shift to select text)"
 		return m, tea.EnableMouseCellMotion
 	case "/copy":
 		if m.session == nil {
