@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CHEEP! — a multi-agent coding shell you can watch</title>
-<meta name="description" content="cheep squeezes the most out of your AI budget: a smart orchestrator plans and verifies while cheap or local executor agents do the work — validated before every merge, metered to the dollar, with a no-mistakes mode where nothing lands without your sign-off. One static binary.">
+<meta name="description" content="cheep squeezes the most out of your AI budget: a smart orchestrator plans and verifies while cheap or local executor agents do the work — validated before every merge, metered to the dollar, with goal loops, scheduled jobs, and a no-mistakes mode where nothing lands without your sign-off. One static binary.">
 <meta property="og:title" content="CHEEP! — a multi-agent coding shell you can watch">
 <meta property="og:description" content="The most results per dollar of compute. A smart orchestrator plans and verifies; cheap or local executors do the work.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -439,6 +439,29 @@
         <p>Append <code>:low|:medium|:high</code> to any model — extended thinking on Claude,
         <code>reasoning_effort</code> elsewhere. Planner thinks hard, workers stay cheap.</p>
       </div>
+      <div class="cell wide" data-reveal>
+        <h3><span class="glyph" style="color:var(--gold)">🕒</span> Scheduled jobs <span class="pill">NEW</span></h3>
+        <p>Say <em>"run the test suite every weekday at 9am"</em> and cheep schedules a recurring
+        job (interval or cron). <code>/scheduled</code> manages them; <code>cheep daemon</code>
+        fires them on cadence — run it in tmux and work happens while you're away.</p>
+      </div>
+      <div class="cell wide" data-reveal>
+        <h3><span class="glyph" style="color:var(--magenta)">∞</span> Loop mode <span class="pill">NEW</span></h3>
+        <p>Give a goal — numeric (<em>"coverage above 85%"</em>) or coverage (<em>"replicate every
+        capability of this site"</em>) — and cheep iterates, measuring each round, stopping only
+        when the goal is met or progress plateaus. The metric decides, not vibes.</p>
+      </div>
+      <div class="cell" data-reveal>
+        <h3><span class="glyph" style="color:var(--cyan)">▤</span> Fits your model <span class="pill">NEW</span></h3>
+        <p>cheep reads each model's context window (cloud from the pricing dataset, local by
+        probing the server) and <b>compresses &amp; continues</b> at ~75% instead of dying with
+        <code>context_exhausted</code>. A live gauge shows the fill.</p>
+      </div>
+      <div class="cell" data-reveal>
+        <h3><span class="glyph" style="color:var(--green)">◫</span> No thrashing <span class="pill">NEW</span></h3>
+        <p>Subtasks sharing one local model serialize per endpoint (they'd only queue anyway);
+        distinct backends still run in parallel. Add a second model and the speedup returns.</p>
+      </div>
       <div class="cell" data-reveal>
         <h3><span class="glyph" style="color:var(--green)">↻</span> Loop until green</h3>
         <p><code>iterate_until</code> re-runs a cheap executor against your check (tests, lint)
@@ -449,10 +472,11 @@
         <p>Interrupted delegations are surfaced at the next launch with the branch that holds the
         partial work. <code>/stow</code> writes a handoff note before you step away.</p>
       </div>
-      <div class="cell" data-reveal>
-        <h3><span class="glyph" style="color:var(--cyan)">▦</span> One static binary</h3>
-        <p>No runtime, no dependencies. Everything above is covered by the test suite —
-        <code>go test ./...</code>.</p>
+      <div class="cell wide" data-reveal>
+        <h3><span class="glyph" style="color:var(--cyan)">⟳</span> Native terminal, anywhere <span class="pill">NEW</span></h3>
+        <p>Renders inline in your terminal's own scrollback — native scroll, select, and copy.
+        <code>/cd</code> moves the agents to another repo mid-session. <code>go test ./...</code>
+        covers every feature here.</p>
       </div>
     </div>
   </section>
@@ -528,8 +552,25 @@
 Review the $1 package. Focus: $ARGUMENTS
 <span class="k">/review internal/worktree locking</span></code></pre>
       </div>
+      <div class="case" data-reveal>
+        <h3><span class="n">09</span>Schedule recurring work</h3>
+        <p>Ask in plain language; cheep turns it into a cron/interval job. <code>/scheduled</code>
+        to manage, <code>cheep daemon</code> to fire them.</p>
+        <pre><code><span class="u">› run the test suite and fix failures
+  every weekday at 9am</span>
+<span class="out"># scheduled 0 9 * * 1-5 · manage with /scheduled</span>
+<span class="k">cheep daemon</span>  <span class="out"># fires jobs on cadence</span></code></pre>
+      </div>
+      <div class="case" data-reveal>
+        <h3><span class="n">10</span>Loop to a measurable goal</h3>
+        <p>Loop mode agrees on a metric, then iterates until it's hit or plateaus.</p>
+        <pre><code><span class="k">/loop</span>
+<span class="u">› get coverage in ./internal/store
+  above 85%</span>
+<span class="out"># baseline 61% → 74% → 88% ✓ (stops at target)</span></code></pre>
+      </div>
       <div class="case full" data-reveal>
-        <h3><span class="n">09</span>Walk away mid-task. Come back on your phone.</h3>
+        <h3><span class="n">11</span>Walk away mid-task. Come back on your phone.</h3>
         <p>cheep in tmux + Tailscale SSH = the same live session — running task, tabs, pending
         approvals — from anywhere. Crash markers guarantee interrupted work is surfaced, never
         stranded. <a href="portable.html">Full portable setup →</a></p>
@@ -581,16 +622,18 @@ brew install cheep</code></pre>
         <tr><td><code>cheep run "…" --json</code></td><td>one-shot task; JSONL events for CI</td></tr>
         <tr><td><code>cheep init</code></td><td>project launchpad: AGENTS.md + checks</td></tr>
         <tr><td><code>cheep validate --review</code></td><td>run checks + AI review of the diff</td></tr>
-        <tr><td><code>cheep worktree …</code></td><td>pooled worktrees (other harnesses too)</td></tr>
+        <tr><td><code>cheep jobs …</code></td><td>manage recurring scheduled tasks</td></tr>
+        <tr><td><code>cheep daemon</code></td><td>fire scheduled jobs on their cadence</td></tr>
         <tr><td><code>cheep pi add &lt;pkg&gt;</code></td><td>install a pi.dev extension</td></tr>
         <tr><td><code>cheep check</code></td><td>ping every configured agent</td></tr>
       </table>
       <table data-reveal>
         <tr><th>In the shell</th><th></th></tr>
         <tr><td><code>/nomistakes</code> <code>/approval</code></td><td>sign-off on merges · gate risky calls</td></tr>
+        <tr><td><code>/loop</code> <code>/scheduled</code></td><td>goal loops · recurring jobs</td></tr>
         <tr><td><code>/fork</code> <code>/tree</code> <code>/history</code></td><td>branch, navigate, resume sessions</td></tr>
         <tr><td><code>/delivery merge|pr</code></td><td>how validated work lands</td></tr>
-        <tr><td><code>/budget</code> <code>/tokens</code></td><td>cap spend · live cost + savings</td></tr>
+        <tr><td><code>/budget</code> <code>/tokens</code> <code>/cd</code></td><td>cap spend · cost + savings · move workspace</td></tr>
         <tr><td><code>/prompts</code> <code>/stow</code></td><td>templates · handoff note to disk</td></tr>
         <tr><td><code>/config</code> <code>/setup</code></td><td>configurator · configure by chat</td></tr>
       </table>
