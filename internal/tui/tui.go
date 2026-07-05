@@ -550,6 +550,14 @@ func probeCmd(cfg config.Config) tea.Cmd {
 				st = "no model"
 			case a.Provider == "anthropic" && a.APIKey == "":
 				st = "needs API key"
+			case a.Provider != "anthropic":
+				// Probe the models listing — instant and queue-free. A tiny
+				// completion would wait behind real inference on serial local
+				// servers (LM Studio) and time out while the model is busy
+				// answering the user, reporting a working agent unreachable.
+				if _, _, err := provider.DiscoverModels(a.Endpoint, a.APIKey); err != nil {
+					st = "unreachable"
+				}
 			default:
 				p := provider.For(a.Provider, a.Endpoint, a.APIKey, 16)
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -717,6 +725,14 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(&m).saveHistory() // persist the conversation after every completed turn
 		if m.session != nil {
 			m.ctxTokens = agent.EstTokens(m.session.History())
+		}
+		// A completed turn is proof of life — correct a stale "unreachable"
+		// from a probe that raced real inference on a serial local server.
+		if msg.r.Status == "completed" && m.connectivity != nil && m.connectivity["orchestrator"] != "ok" && m.connectivity["orchestrator"] != "" {
+			m.connectivity["orchestrator"] = "ok"
+			if m.inline {
+				m.pendingOut = append(m.pendingOut, hintSt.Render("agents: ")+okSt.Render("✓")+" orchestrator"+hintSt.Render(" (confirmed by this reply)"))
+			}
 		}
 		// The orchestrator may have rewired cheep via the config tools. Verify the
 		// new orchestrator is reachable BEFORE switching to it (don't brick the
