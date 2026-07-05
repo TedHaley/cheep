@@ -16,6 +16,18 @@ import (
 	"github.com/TedHaley/cheep/internal/mcp"
 )
 
+// WindowLookup is wired to pricing.Window at startup (main), letting
+// ApplyDefaults auto-fill a model's context window from the LiteLLM dataset
+// without config importing pricing (which imports config). nil = no auto-fill.
+var WindowLookup func(model string) (int, bool)
+
+func lookupWindow(model string) (int, bool) {
+	if WindowLookup == nil {
+		return 0, false
+	}
+	return WindowLookup(model)
+}
+
 // Agent describes one model endpoint (orchestrator or executor).
 type Agent struct {
 	Name        string `json:"name,omitempty"`     // executors only
@@ -322,6 +334,11 @@ func (c *Config) ApplyDefaults() {
 	if o.MaxTurns == 0 {
 		o.MaxTurns = 30
 	}
+	if o.ContextWindow == 0 {
+		if w, ok := lookupWindow(o.Model); ok {
+			o.ContextWindow = w
+		}
+	}
 	if o.ContextBudget == 0 {
 		if o.ContextWindow > 0 {
 			o.ContextBudget = o.ContextWindow * 3 / 4
@@ -339,6 +356,11 @@ func (c *Config) ApplyDefaults() {
 		}
 		if e.MaxTurns == 0 {
 			e.MaxTurns = 20
+		}
+		if e.ContextWindow == 0 {
+			if w, ok := lookupWindow(e.Model); ok {
+				e.ContextWindow = w
+			}
 		}
 		// Self-compact well before the window so a chunk gets summarized and
 		// continued instead of dying; keep the hard stop just under the window.

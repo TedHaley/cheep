@@ -24,8 +24,9 @@ import (
 const litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 var (
-	mu      sync.RWMutex
-	fetched map[string][2]float64 // lower(model) -> {inputUSDper1M, outputUSDper1M}
+	mu         sync.RWMutex
+	fetched    map[string][2]float64 // lower(model) -> {inputUSDper1M, outputUSDper1M}
+	fetchedWin map[string]int        // lower(model) -> context window in tokens
 )
 
 func cachePath() (string, error) {
@@ -92,23 +93,57 @@ func Refresh(ctx context.Context) error {
 
 func parseInto(b []byte) {
 	var raw map[string]struct {
-		In  float64 `json:"input_cost_per_token"`
-		Out float64 `json:"output_cost_per_token"`
+		In       float64 `json:"input_cost_per_token"`
+		Out      float64 `json:"output_cost_per_token"`
+		MaxInput int     `json:"max_input_tokens"`
+		MaxTok   int     `json:"max_tokens"`
 	}
 	if json.Unmarshal(b, &raw) != nil {
 		return
 	}
 	m := make(map[string][2]float64, len(raw))
+	w := make(map[string]int, len(raw))
 	for k, v := range raw {
+		low := strings.ToLower(k)
 		if v.In > 0 || v.Out > 0 {
-			m[strings.ToLower(k)] = [2]float64{v.In * 1e6, v.Out * 1e6} // per-token → per-1M
+			m[low] = [2]float64{v.In * 1e6, v.Out * 1e6} // per-token → per-1M
+		}
+		if win := v.MaxInput; win > 0 {
+			w[low] = win
+		} else if v.MaxTok > 0 {
+			w[low] = v.MaxTok
 		}
 	}
 	if len(m) > 0 {
 		mu.Lock()
 		fetched = m
+		if len(w) > 0 {
+			fetchedWin = w
+		}
 		mu.Unlock()
 	}
+}
+
+// Window returns a model's context window in tokens from the LiteLLM dataset,
+// or 0 if unknown. Local models rarely appear (their window is a load-time
+// choice), so callers keep an explicit config override.
+func Window(model string) (int, bool) {
+	base, _ := core.SplitThinking(model)
+	low := strings.ToLower(base)
+	mu.RLock()
+	defer mu.RUnlock()
+	if fetchedWin == nil {
+		return 0, false
+	}
+	if w, ok := fetchedWin[low]; ok {
+		return w, true
+	}
+	if i := strings.LastIndex(low, "/"); i >= 0 {
+		if w, ok := fetchedWin[low[i+1:]]; ok {
+			return w, true
+		}
+	}
+	return 0, false
 }
 
 // lookupFetched tries the live dataset: exact match, then the part after a

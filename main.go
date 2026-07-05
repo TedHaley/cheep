@@ -55,9 +55,10 @@ const bannerArt = `
  ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚═╝`
 
 func main() {
-	config.Init()          // migrate legacy config + load ~/.cheep/keys.env into the env
-	pricing.Load()         // load cached per-token prices (no network)
-	pricing.MaybeRefresh() // refresh the price dataset in the background if stale
+	config.Init()                        // migrate legacy config + load ~/.cheep/keys.env into the env
+	config.WindowLookup = pricing.Window // auto-fill context windows from the priced dataset
+	pricing.Load()                       // load cached per-token prices (no network)
+	pricing.MaybeRefresh()               // refresh the price dataset in the background if stale
 	if len(os.Args) < 2 {
 		cmdChat()
 		return

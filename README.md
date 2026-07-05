@@ -282,9 +282,12 @@ the target repo.)
 
 ### Per-model context windows
 
-Set `"context_window"` (tokens) on any agent and cheep sizes everything to fit: it
-self-compacts at ~75% of the window and hard-stops just under it, so a small local model
-**compresses and continues** mid-task instead of dying with `context_exhausted`. Each
+For cloud models, cheep reads the context window straight from the LiteLLM dataset it
+already caches for pricing (`~/.cheep/prices.json`) — no configuration needed. For local
+models (which rarely appear there, since the window is a load-time choice) set
+`"context_window"` explicitly. Either way, cheep sizes everything to fit: it self-compacts
+at ~75% of the window and hard-stops just under it, so a small local model **compresses and
+continues** mid-task instead of dying with `context_exhausted`. Each
 compaction is saved to `~/.cheep/history/notes.md`, and the orchestrator sees each
 executor's window in its roster — so it splits big jobs ("copy every capability of this
 site") into chunks that fit rather than overflowing one session.
