@@ -145,6 +145,9 @@ func ensureConfig() config.Config {
 		fatal(fmt.Errorf("reading config: %w", err))
 	}
 	c.ResolveWindows(provider.ContextWindow)
+	for ep, n := range c.EndpointConcurrency {
+		provider.SetEndpointLimit(ep, n)
+	}
 	return c
 }
 
@@ -244,6 +247,9 @@ func cmdChat() {
 				fatal(fmt.Errorf("reading config: %w", err))
 			}
 			c.ResolveWindows(provider.ContextWindow)
+			for ep, n := range c.EndpointConcurrency {
+				provider.SetEndpointLimit(ep, n)
+			}
 			cfg = c
 		}
 		mt, mcpSess := startMCP(cfg)

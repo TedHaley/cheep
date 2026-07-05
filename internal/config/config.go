@@ -134,6 +134,11 @@ type Config struct {
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
 
+	// EndpointConcurrency caps concurrent in-flight requests per endpoint URL
+	// (0/absent = default: local endpoints serialize at 1, cloud is unlimited).
+	// Raise a beefy local server, or throttle a rate-limited cloud one.
+	EndpointConcurrency map[string]int `json:"endpoint_concurrency,omitempty"`
+
 	// PiExtensions are pi coding-agent extensions (https://pi.dev) to run via
 	// the bundled Node bridge: npm package names installed with `cheep pi add`,
 	// or local paths. Their registered tools join the agents' tool set like any

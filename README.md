@@ -272,6 +272,20 @@ graceful version: before a `/clear` or a walk-away it records durable lessons vi
 `record_lesson` and appends a structured handoff note (done / in flight / next steps) to
 `~/.cheep/history/notes.md`.
 
+### Per-endpoint concurrency
+
+Delegated subtasks run in parallel — but several executors (or the orchestrator plus its
+executors) often share one local model server, which serves requests serially. cheep caps
+in-flight completions **per endpoint**: local endpoints default to **1** (no thrashing, no
+pointless queueing), cloud endpoints are unlimited. Distinct endpoints keep separate
+limiters, so genuine parallelism across different backends is preserved — add a second
+model and the speedup returns. Override per endpoint in config.json when a local box can
+take more (or a cloud one less):
+
+```json
+"endpoint_concurrency": { "http://127.0.0.1:1234/v1": 2 }
+```
+
 ### Working across directories
 
 cheep's file tools are scoped to the workspace (that's what makes worktree isolation real),
