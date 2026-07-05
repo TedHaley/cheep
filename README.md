@@ -286,6 +286,26 @@ take more (or a cloud one less):
 "endpoint_concurrency": { "http://127.0.0.1:1234/v1": 2 }
 ```
 
+### Scheduled jobs
+
+Ask cheep to do something on a cadence — "run the test suite every weekday at 9am", "scout
+for security issues every 2 hours" — and it schedules a recurring **job** (the orchestrator
+translates your phrasing into an interval or cron expression via the `schedule_task` tool).
+Manage them with **`/scheduled`** in the shell: space toggles on/off, `r` runs one now, `d`
+deletes. Jobs fire while **`cheep daemon`** is running — start it once (in tmux, per the
+[phone guide](portable.html)) and it runs due jobs on their cadence. From the CLI:
+
+```sh
+cheep jobs add "run the test suite and fix failures" "0 9 * * 1-5" --name morning-tests
+cheep jobs list                 # id, schedule, next run, last status
+cheep jobs run morning-tests    # run once now
+cheep jobs on|off|rm <id|name>  # enable / disable / delete
+cheep daemon                    # fire jobs on their cadence (keep running)
+```
+
+Schedules are a Go duration (`30m`, `2h`, `24h`) or a 5-field cron expression (`0 9 * * *`
+= 9am daily, `0 9 * * 1-5` = 9am weekdays, `*/15 * * * *` = every 15 minutes).
+
 ### Working across directories
 
 cheep's file tools are scoped to the workspace (that's what makes worktree isolation real),

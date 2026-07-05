@@ -93,6 +93,9 @@ func (m model) updateOverlay(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.overlay == "tree" {
 		return m.updateTree(msg)
 	}
+	if m.overlay == "scheduled" {
+		return m.updateScheduled(msg)
+	}
 	if m.overlay == "approval" {
 		return m.updateApproval(msg)
 	}
@@ -146,6 +149,9 @@ func (m model) viewOverlay() string {
 	if m.overlay == "tree" {
 		return m.viewTree()
 	}
+	if m.overlay == "scheduled" {
+		return m.viewScheduled()
+	}
 	if m.overlay == "approval" {
 		return m.viewApproval()
 	}
@@ -182,6 +188,7 @@ func (m model) viewHelp() string {
 		"  /fork /tree      branch from an earlier turn / navigate the session tree",
 		"  /prompts         list /name prompt templates (.cheep/prompts, ~/.cheep/prompts)",
 		"  /delivery        how validated work lands: merge (local) | pr (push + gh pr)",
+		"  /scheduled       view & modify recurring jobs (space on/off · r run · d delete)",
 		"  /cd <path>       move the agents to another workspace directory",
 		"  /stow            sweep lessons + a handoff note to disk before /clear",
 		"  /copy /mouse     copy the last reply · opt into wheel-scroll mouse capture",

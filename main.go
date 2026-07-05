@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/jobs"
 	"github.com/TedHaley/cheep/internal/mcp"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/piext"
@@ -82,6 +84,10 @@ func main() {
 		cmdValidate(os.Args[2:])
 	case "pi":
 		cmdPi(os.Args[2:])
+	case "jobs":
+		cmdJobs(os.Args[2:])
+	case "daemon":
+		cmdDaemon(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("cheep %s\n", version)
 	case "-h", "--help", "help":
@@ -118,6 +124,10 @@ Usage:
                                  other harnesses; cheep uses the pool itself)
   cheep pi <add|remove|list>     run pi coding-agent extensions (pi.dev): their
                                  registered tools join the agents' tool set
+  cheep jobs <list|add|rm|run|on|off|logs>
+                                 manage recurring scheduled tasks
+  cheep daemon                   run scheduled jobs on their cadence (keep it
+                                 running, e.g. in tmux)
   cheep version                  print the version
 
 On first use, cheep walks you through choosing an orchestrator and, optionally,
@@ -176,6 +186,197 @@ func startMCP(cfg config.Config) (mcp.Tools, *mcp.Session) {
 		fmt.Fprintf(os.Stderr, "%s%s%s\n", cDim, e.Status, cReset)
 	})
 }
+
+// cmdJobs manages recurring scheduled tasks (internal/jobs).
+func cmdJobs(args []string) {
+	usage := func() {
+		fmt.Print(`cheep jobs — recurring scheduled tasks.
+
+Usage:
+  cheep jobs [list]                       list jobs
+  cheep jobs add "<task>" <schedule> [--name N] [--workdir D]
+                                          schedule = 30m | 2h | 24h  OR  cron "0 9 * * *"
+  cheep jobs run  <id|name>               run a job once now
+  cheep jobs on   <id|name>               enable
+  cheep jobs off  <id|name>               disable
+  cheep jobs rm   <id|name>               delete
+  cheep jobs logs <id|name>               recent run log
+
+Jobs fire while 'cheep daemon' is running.
+`)
+	}
+	sub := "list"
+	if len(args) > 0 {
+		sub = args[0]
+	}
+	switch sub {
+	case "list", "ls":
+		list, _ := jobs.List()
+		if len(list) == 0 {
+			fmt.Println("no scheduled jobs — add one with: cheep jobs add \"run tests\" 24h")
+			return
+		}
+		now := time.Now()
+		for _, j := range list {
+			state := cGreen + "on " + cReset
+			if !j.Enabled {
+				state = cDim + "off" + cReset
+			}
+			name := j.Name
+			if name == "" {
+				name = j.ID
+			}
+			next := ""
+			if n, ok := j.Next(now); ok && j.Enabled {
+				next = "  next " + n.Local().Format("Mon 15:04")
+			}
+			last := ""
+			if j.LastStatus != "" {
+				last = "  last " + j.LastStatus
+			}
+			fmt.Printf("%s  %-18s  %-12s  %s%s%s\n", state, short(name, 18), j.Schedule,
+				short(strings.ReplaceAll(j.Task, "\n", " "), 44), next, last)
+		}
+	case "add":
+		rest := args[1:]
+		name, workdir := "", ""
+		var pos []string
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--name":
+				if i+1 < len(rest) {
+					i++
+					name = rest[i]
+				}
+			case "--workdir":
+				if i+1 < len(rest) {
+					i++
+					workdir = rest[i]
+				}
+			default:
+				pos = append(pos, rest[i])
+			}
+		}
+		if len(pos) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		sched := pos[len(pos)-1]
+		task := strings.Join(pos[:len(pos)-1], " ")
+		if workdir == "" {
+			workdir, _ = os.Getwd()
+		}
+		if abs, err := filepath.Abs(workdir); err == nil {
+			workdir = abs
+		}
+		j := jobs.Job{ID: jobs.NewID(time.Now()), Name: name, Task: task, Workdir: workdir,
+			Schedule: sched, Enabled: true, Created: time.Now()}
+		if err := j.Validate(); err != nil {
+			fatal(err)
+		}
+		if err := jobs.Save(j); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%s✓%s scheduled %s (%s)\n", cGreen, cReset, j.ID, sched)
+	case "run":
+		if len(args) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		j, err := jobs.Find(args[1])
+		if err != nil {
+			fatal(err)
+		}
+		runJobOnce(j)
+	case "on", "off", "enable", "disable":
+		if len(args) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		j, err := jobs.Find(args[1])
+		if err != nil {
+			fatal(err)
+		}
+		j.Enabled = sub == "on" || sub == "enable"
+		if err := jobs.Save(j); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%s is now %s\n", j.ID, map[bool]string{true: "enabled", false: "disabled"}[j.Enabled])
+	case "rm", "remove", "delete":
+		if len(args) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		if err := jobs.Remove(args[1]); err != nil {
+			fatal(err)
+		}
+		fmt.Println("removed")
+	case "logs", "log":
+		if len(args) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		j, err := jobs.Find(args[1])
+		if err != nil {
+			fatal(err)
+		}
+		lg := jobs.Log(j.ID, 40)
+		if len(lg) == 0 {
+			fmt.Println("(no runs yet)")
+			return
+		}
+		fmt.Println(strings.Join(lg, "\n"))
+	default:
+		usage()
+		os.Exit(2)
+	}
+}
+
+// runJobOnce executes a job's task now and records the outcome.
+func runJobOnce(j jobs.Job) {
+	cfg, err := config.Load()
+	if err != nil {
+		fatal(fmt.Errorf("reading config: %w", err))
+	}
+	cfg.ResolveWindows(provider.ContextWindow)
+	for ep, n := range cfg.EndpointConcurrency {
+		provider.SetEndpointLimit(ep, n)
+	}
+	fmt.Printf("%s▶ job %s%s  %s\n", cCyan, j.ID, cReset, short(strings.ReplaceAll(j.Task, "\n", " "), 60))
+	r, err := runHeadless(cfg, j.Task, j.Workdir, true, func(core.Event) {})
+	status := "error"
+	if err != nil {
+		jobs.AppendLog(j.ID, "error: "+err.Error())
+	} else {
+		status = r.Status
+		jobs.AppendLog(j.ID, fmt.Sprintf("%s · %d turns · in=%d out=%d", r.Status, r.Turns, r.InputTokens, r.OutputTokens))
+	}
+	j.LastRun = time.Now()
+	j.LastStatus = status
+	j.Runs++
+	_ = jobs.Save(j)
+	fmt.Printf("  %s%s%s\n", map[bool]string{true: cGreen, false: cYellow}[status == "completed"], status, cReset)
+}
+
+// cmdDaemon runs due jobs on their cadence until interrupted.
+func cmdDaemon(args []string) {
+	fmt.Printf("%scheep daemon%s — firing scheduled jobs (Ctrl+C to stop)\n", cCyan, cReset)
+	if list, _ := jobs.List(); len(list) == 0 {
+		fmt.Printf("%sno jobs scheduled yet — add one with `cheep jobs add` or ask in the shell%s\n", cDim, cReset)
+	}
+	for {
+		now := time.Now()
+		list, _ := jobs.List()
+		for _, j := range list {
+			if j.Due(now) {
+				runJobOnce(j)
+			}
+		}
+		time.Sleep(30 * time.Second)
+	}
+}
+
+// cmdPi manages pi coding-agent extensions run through the bundled bridge.
 
 // cmdPi manages pi coding-agent extensions run through the bundled bridge.
 func cmdPi(args []string) {
@@ -621,6 +822,22 @@ func cmdKeys() {
 
 // ---- one-shot run ---------------------------------------------------------
 
+// runHeadless builds the orchestrator and runs one task non-interactively —
+// the shared execution path for `cheep run` and scheduled jobs. MCP servers
+// (incl. pi extensions) are started and closed around the run.
+func runHeadless(cfg config.Config, task, workdir string, isolate bool, onEvent core.EventFunc) (agent.RunResult, error) {
+	mt, mcpSess := startMCP(cfg)
+	defer mcpSess.Close()
+	orch, err := orchestrator.Build(cfg, workdir, orchestrator.Options{
+		Isolate: isolate, Mode: orchestrator.ModeAuto,
+		ExtraOrch: mt.Orchestrator, ExtraExec: mt.Executor, OnEvent: onEvent,
+	})
+	if err != nil {
+		return agent.RunResult{}, err
+	}
+	return orch.Run(task), nil
+}
+
 func cmdRun(argv []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	workdir := fs.String("workdir", ".", "workspace directory the agents operate in")
@@ -651,8 +868,6 @@ func cmdRun(argv []string) {
 	}
 
 	cfg := ensureConfig()
-	mt, mcpSess := startMCP(cfg)
-	defer mcpSess.Close()
 
 	// --json: one {"type":"event",...} line per core.Event on stdout, then a
 	// final {"type":"result",...} line. Treat this shape as a public API.
@@ -666,18 +881,14 @@ func cmdRun(argv []string) {
 			_ = enc.Encode(map[string]any{"type": "event", "ts": time.Now().UTC().Format(time.RFC3339), "event": e})
 		}
 	}
-
-	orch, err := orchestrator.Build(cfg, *workdir, orchestrator.Options{
-		Isolate: *isolate, Mode: orchestrator.ModeAuto, ExtraOrch: mt.Orchestrator, ExtraExec: mt.Executor, OnEvent: onEvent,
-	})
+	if !*asJSON {
+		fmt.Println("──────────── cheep ────────────")
+	}
+	r, err := runHeadless(cfg, task, *workdir, *isolate, onEvent)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%scheep: %v%s\n", cRed, err, cReset)
 		os.Exit(2)
 	}
-	if !*asJSON {
-		fmt.Println("──────────── cheep ────────────")
-	}
-	r := orch.Run(task)
 	if *asJSON {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"type": "result", "status": r.Status, "output": r.Output, "turns": r.Turns,
@@ -991,6 +1202,14 @@ func shortArgs(args map[string]any) string {
 		out = out[:200]
 	}
 	return out
+}
+
+func short(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len([]rune(s)) > n {
+		return string([]rune(s)[:n]) + "…"
+	}
+	return s
 }
 
 func shortText(s string) string {

@@ -36,6 +36,7 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/inflight"
+	"github.com/TedHaley/cheep/internal/jobs"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/prompts"
@@ -157,6 +158,9 @@ type model struct {
 
 	forkPoints []int // message indices of user turns (the /fork overlay's rows)
 	forkCursor int
+
+	jobsList   []jobs.Job // /scheduled overlay rows
+	jobsCursor int
 }
 
 var (
@@ -1254,6 +1258,8 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m.openFork()
 	case "/tree":
 		return m.openTree()
+	case "/scheduled", "/schedule":
+		return m.openScheduled()
 	case "/cd":
 		f := strings.Fields(text)
 		if len(f) < 2 {

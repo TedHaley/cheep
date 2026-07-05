@@ -28,6 +28,7 @@ import (
 	"github.com/TedHaley/cheep/internal/dispatch"
 	"github.com/TedHaley/cheep/internal/history"
 	"github.com/TedHaley/cheep/internal/inflight"
+	"github.com/TedHaley/cheep/internal/jobs"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
@@ -379,6 +380,51 @@ helper running on an executor model. Get the user running again, as easily as po
    set_orchestrator provider="openai" with the discovered endpoint (or add_executor).
 Keep replies short and make every change through the tools.`
 
+// scheduleTool lets the agent create a recurring background job when the user
+// asks to do something "every X" or "at X time". The agent translates natural
+// language into the schedule string (duration or cron).
+func scheduleTool(workdir string) core.Tool {
+	return core.Tool{
+		Name: "schedule_task",
+		Description: "Schedule a task to run automatically on a recurring basis. Use when the user asks " +
+			"to do something repeatedly (\"every 2 hours\", \"at 9am daily\", \"every weekday morning\"). " +
+			"The \"schedule\" is EITHER a Go duration for intervals (\"30m\", \"2h\", \"24h\") OR a 5-field " +
+			"cron expression for clock times: \"0 9 * * *\" = 9am daily, \"0 9 * * 1-5\" = 9am weekdays, " +
+			"\"*/15 * * * *\" = every 15 minutes, \"0 */2 * * *\" = every 2 hours on the hour. Jobs run via " +
+			"the `cheep daemon` process — after scheduling, tell the user to run `cheep daemon` (e.g. in tmux) " +
+			"if it isn't already running. Manage jobs with /scheduled.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"task":     map[string]any{"type": "string", "description": "The task to run each time (self-contained, as if typed at the prompt)."},
+				"schedule": map[string]any{"type": "string", "description": "Interval (\"2h\") or 5-field cron (\"0 9 * * *\")."},
+				"name":     map[string]any{"type": "string", "description": "Short label for the job (optional)."},
+			},
+			"required": []string{"task", "schedule"},
+		},
+		Func: func(_ context.Context, args map[string]any) string {
+			task := strArg(args, "task")
+			sched := strArg(args, "schedule")
+			j := jobs.Job{
+				ID: jobs.NewID(time.Now()), Name: strArg(args, "name"), Task: task,
+				Workdir: workdir, Schedule: sched, Enabled: true, Created: time.Now(),
+			}
+			if err := j.Validate(); err != nil {
+				return "ERROR: " + err.Error()
+			}
+			if err := jobs.Save(j); err != nil {
+				return "ERROR: couldn't save job: " + err.Error()
+			}
+			next := ""
+			if n, ok := j.Next(time.Now()); ok {
+				next = " · next run " + n.Local().Format("Mon Jan 2 15:04")
+			}
+			return "Scheduled job " + j.ID + " (" + sched + ")" + next +
+				". It runs when `cheep daemon` is active; manage jobs with /scheduled."
+		},
+	}
+}
+
 // usable reports whether an agent can actually run.
 func usable(a config.Agent) bool {
 	return a.Model != "" && !(a.Provider == "anthropic" && a.APIKey == "")
@@ -639,6 +685,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		soloTools := append(opt.Gate.Wrap(tool.Make(workdir, true), true, workdir), extraOrch...)
 		soloTools = append(soloTools, extraExec...)
 		soloTools = append(soloTools, configtools.Tools()...)
+		soloTools = append(soloTools, scheduleTool(workdir))
 		soloTools = append(soloTools, skillTools...)
 		soloTools = append(soloTools, project.LessonTool(workdir))
 		soloSys := soloSystem
@@ -1221,6 +1268,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool, iterateMetricTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
+	tools = append(tools, scheduleTool(workdir))
 	tools = append(tools, skillTools...)
 	tools = append(tools, project.LessonTool(workdir))
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,

@@ -40,6 +40,7 @@ var slashCmds = []slashCmd{
 	{"/mouse", "opt into mouse capture (wheel scrolls tabs)"},
 	{"/keeptabs", "toggle auto-close of finished executor tabs"},
 	{"/close", "close the focused executor tab"},
+	{"/scheduled", "view & modify recurring scheduled jobs"},
 	{"/cd", "move the agents to another workspace directory"},
 	{"/stow", "sweep lessons + handoff note to disk before a reset"},
 	{"/clear", "reset the conversation"},
