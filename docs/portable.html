@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CHEEP! — use it from your phone</title>
+<meta name="description" content="Make cheep portable: run it in tmux, reach the same live session from your phone over Tailscale SSH, and let long tasks keep working while you're away. Zero new software to write.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #07090d; --bg2: #0b0f16; --panel: #10161f;
+    --border: #1e2836; --border-hi: #2c3a4e;
+    --fg: #e8eef6; --muted: #8593a7; --dim: #5c6a7d;
+    --gold: #f5c518; --cyan: #56d4dd; --green: #3fb950; --magenta: #d787ff;
+    --grad: linear-gradient(92deg, #00ffff, #00afff, #5fafff, #afafff, #d787ff, #ff5fff);
+    --font-display: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 var(--font-display); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  ::selection { background: var(--gold); color: #000; }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  code, pre { font-family: var(--font-mono); }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 24px; position: relative; }
+  .glow { position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background:
+      radial-gradient(560px 380px at 80% -5%, rgba(86,212,221,.09), transparent 70%),
+      radial-gradient(520px 360px at 12% 22%, rgba(215,135,255,.06), transparent 70%); }
+  .grain { position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: .05;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.6'/%3E%3C/svg%3E"); }
+  nav, main, header.hero, footer { position: relative; z-index: 2; }
+
+  nav { position: sticky; top: 0; z-index: 50; backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    background: color-mix(in srgb, var(--bg) 74%, transparent); border-bottom: 1px solid var(--border); }
+  .navrow { display: flex; align-items: center; gap: 22px; height: 58px; }
+  .navlogo { font-family: var(--font-mono); font-weight: 800; letter-spacing: .06em;
+    background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; font-size: 17px; }
+  .navlinks { margin-left: auto; display: flex; gap: 20px; font-size: 14px; }
+  .navlinks a { color: var(--muted); }
+  .navlinks a:hover { color: var(--fg); text-decoration: none; }
+
+  header.hero { padding: 92px 0 30px; }
+  .kicker { font-family: var(--font-mono); font-size: 12.5px; font-weight: 600;
+    letter-spacing: .28em; text-transform: uppercase; color: var(--gold); margin: 0 0 14px; }
+  h1 { font-size: clamp(32px, 6vw, 54px); line-height: 1.08; margin: 0 0 18px;
+    font-weight: 700; letter-spacing: -.01em; }
+  h1 .g { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { color: var(--muted); font-size: 17.5px; max-width: 640px; margin: 0; }
+  .lede b { color: var(--fg); }
+
+  section { padding: 56px 0; }
+  h2 { font-size: clamp(24px, 3.6vw, 32px); margin: 0 0 22px; font-weight: 700; }
+  pre { background: #0b1018; border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; overflow-x: auto; font-size: 13.5px; line-height: 1.7; margin: 0 0 14px; }
+  .out { color: var(--dim); }
+  p code, li code, td code { background: var(--panel); border: 1px solid var(--border);
+    padding: 1px 7px; border-radius: 6px; font-size: 13px; color: var(--gold); }
+
+  ol.steps { padding: 0; margin: 0; list-style: none; counter-reset: step; display: grid; gap: 12px; }
+  ol.steps > li { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 18px 18px 60px; position: relative; counter-increment: step; min-width: 0;
+    transition: border-color .3s, transform .3s; }
+  ol.steps > li:hover { border-color: var(--border-hi); transform: translateY(-2px); }
+  ol.steps > li::before { content: counter(step); position: absolute; left: 16px; top: 17px;
+    width: 28px; height: 28px; border-radius: 50%; background: var(--gold); color: #000;
+    font-weight: 700; display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-family: var(--font-mono); }
+  ol.steps b { color: var(--fg); }
+  ol.steps li p { margin: 4px 0 0; color: var(--muted); font-size: 14.5px; }
+
+  ul.tips { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px;
+    grid-template-columns: 1fr 1fr; }
+  ul.tips li { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px; color: var(--muted); font-size: 14.5px; min-width: 0;
+    transition: border-color .3s, transform .3s; }
+  ul.tips li:hover { border-color: var(--border-hi); transform: translateY(-2px); }
+  ul.tips b { color: var(--fg); display: block; margin-bottom: 4px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 600; font-family: var(--font-mono); font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .14em; }
+  td { color: var(--muted); }
+
+  footer { border-top: 1px solid var(--border); padding: 46px 20px 60px; text-align: center;
+    color: var(--dim); font-size: 14px; }
+  footer .flogo { font-family: var(--font-mono); font-weight: 800; letter-spacing: .08em;
+    background: var(--grad); -webkit-background-clip: text; background-clip: text;
+    color: transparent; font-size: 16px; display: block; margin-bottom: 12px; }
+
+  @media (max-width: 680px) {
+    ul.tips { grid-template-columns: 1fr; }
+    .navlinks a:not(:last-child) { display: none; }
+    table { display: block; overflow-x: auto; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="glow" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<nav aria-label="Site">
+  <div class="wrap navrow">
+    <a class="navlogo" href="index.html">CHEEP!</a>
+    <div class="navlinks">
+      <a href="index.html#showcase">Showcase</a>
+      <a href="index.html#install">Install</a>
+      <a href="https://github.com/TedHaley/cheep">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero wrap">
+  <p class="kicker">Portable setup</p>
+  <h1>The same live session,<br><span class="g">on every device you own.</span></h1>
+  <p class="lede">cheep is a plain terminal app, so the most reliable portable setup needs
+  <b>zero new software</b>: leave cheep running inside <b>tmux</b> on your main machine and
+  attach from anywhere over SSH. Full TUI — agent tabs, cost meter, pending approvals — and a
+  long-running delegation keeps working while your phone is in your pocket.</p>
+</header>
+
+<main class="wrap">
+
+  <section data-reveal>
+    <h2>The three pieces (all free)</h2>
+    <p class="lede" style="margin-bottom:20px"><a href="https://tailscale.com">Tailscale</a>
+    gives your phone a private, encrypted path to your machine from anywhere — no port
+    forwarding, no public IP. <b>tmux</b> keeps the session alive between connections. An SSH
+    app on the phone is the window into it.</p>
+  </section>
+
+  <section id="setup" data-reveal>
+    <h2>One-time setup <span style="color:var(--dim);font-size:.6em">· ~5 minutes</span></h2>
+    <ol class="steps">
+      <li><b>Install Tailscale on both devices.</b>
+        <p><a href="https://tailscale.com/download">tailscale.com/download</a> on the Mac (or
+        Linux box) and the phone app store; sign both into the same tailnet. Note your
+        machine's tailnet name (e.g. <code>teds-macbook</code>).</p></li>
+      <li><b>Enable SSH on the machine.</b>
+        <p>macOS: System Settings → General → Sharing → <b>Remote Login</b> (or
+        <code>sudo systemsetup -setremotelogin on</code>). Linux:
+        <code>sudo systemctl enable --now sshd</code>. Prefer key auth: generate a key in the
+        phone app, paste the public key into <code>~/.ssh/authorized_keys</code>.</p></li>
+      <li><b>Install tmux</b>
+        <p><code>brew install tmux</code> (macOS) or your package manager. Recommended for
+        cellular: <code>brew install mosh</code>.</p></li>
+      <li><b>Pick a phone SSH app.</b>
+        <p>iOS: <a href="https://blink.sh">Blink Shell</a> (best keyboard for TUIs, mosh built
+        in) or <a href="https://termius.com">Termius</a>. Android: Termius or JuiceSSH. Add a
+        host entry for the tailnet name so connecting is one tap.</p></li>
+    </ol>
+  </section>
+
+  <section id="daily" data-reveal>
+    <h2>Daily use</h2>
+    <p style="color:var(--muted)">On the machine, start (or rejoin) cheep inside tmux:</p>
+    <pre><code>tmux new -As cheep    <span class="out"># -As: attach if it exists, create if not</span>
+cheep</code></pre>
+    <p style="color:var(--muted)">From the phone:</p>
+    <pre><code>ssh teds-macbook -t 'tmux attach -t cheep'
+<span class="out"># flaky networks / switching wifi↔cellular:</span>
+mosh teds-macbook -- tmux attach -t cheep</code></pre>
+    <p style="color:var(--muted)">You're now in the <b style="color:var(--fg)">exact same</b>
+    session — same conversation, same running task, same tabs, same pending approvals. Detach
+    with <code>ctrl+b d</code> (or just close the app; tmux doesn't care). Anything you started
+    from the phone is still there when you sit back down at the desk — and vice versa.</p>
+
+    <h2 style="margin-top:44px;font-size:22px">The walk-away workflow</h2>
+    <pre><code><span class="out"># at your desk:</span>
+› rewrite the storage layer to use sqlite; iterate until `go test ./...` passes
+/budget 3                <span class="out"># bound the worst case</span>
+<span class="out"># … leave. later, from the couch:</span>
+ssh teds-macbook -t 'tmux attach -t cheep'
+<span class="out"># glance at the tab glyphs (● running · ✓ done · ⚠ stuck · ✗ error),
+# /tokens for spend, answer any queued approval, queue the next task, detach</span></code></pre>
+    <p style="color:var(--muted)">Pair it with <code>/nomistakes on</code> and nothing can merge
+    while you're away — held work waits on branches for your sign-off, and the approval overlay
+    is right there the next time you attach. Before a long break, <code>/stow</code> writes
+    lessons and a done / in-flight / next-steps note to <code>~/.cheep/history/notes.md</code>.
+    If the machine ever dies mid-task, the next launch lists exactly which delegations were
+    interrupted and which branches hold their partial work.</p>
+  </section>
+
+  <section id="tips" data-reveal>
+    <h2>Tips</h2>
+    <ul class="tips">
+      <li><b>Phone keyboards</b>cheep leans on Tab / Shift+Tab / Ctrl+W / Esc. Blink and Termius
+        both show a key toolbar above the keyboard; slash commands (<code>/mode</code>,
+        <code>/close</code>, <code>/history</code>) cover the same actions when a chord is
+        awkward.</li>
+      <li><b>mosh &gt; ssh on the move</b>mosh roams across wifi/cellular and survives the phone
+        sleeping for hours. Blink has it built in; <code>brew install mosh</code> on the
+        machine.</li>
+      <li><b>Keep the machine awake</b>macOS: <code>caffeinate -s</code> in another tmux window,
+        or Energy Settings → prevent sleep on power. A sleeping Mac runs no agents.</li>
+      <li><b>Scrollback</b><code>ctrl+b [</code> puts tmux in copy mode for scrolling history;
+        <code>q</code> exits. Inside cheep, PgUp/PgDn scroll the focused tab.</li>
+      <li><b>Zellij works too</b><code>zellij attach</code> behaves the same way. Browser-based
+        alternative: <a href="https://github.com/tsl0922/ttyd">ttyd</a>
+        (<code>ttyd -W tmux attach -t cheep</code> bound to the tailnet address), but SSH + tmux
+        is less to secure.</li>
+      <li><b>Why not a built-in server?</b>A future <code>cheep serve</code> could host the shell
+        over the web — but tmux gives attach/detach resilience, multi-device access, and
+        scrollback for free, with Tailscale handling auth and encryption. It works today.</li>
+    </ul>
+
+    <h2 style="margin-top:44px;font-size:22px">Cheat sheet</h2>
+    <table>
+      <tr><th>Where</th><th>Command</th></tr>
+      <tr><td>Machine, once per boot</td><td><code>tmux new -As cheep</code> then <code>cheep</code></td></tr>
+      <tr><td>Phone, connect</td><td><code>ssh &lt;tailnet-name&gt; -t 'tmux attach -t cheep'</code></td></tr>
+      <tr><td>Phone, flaky network</td><td><code>mosh &lt;tailnet-name&gt; -- tmux attach -t cheep</code></td></tr>
+      <tr><td>Anywhere, leave</td><td><code>ctrl+b d</code> — detach; everything keeps running</td></tr>
+      <tr><td>Before stepping away</td><td><code>/stow</code> · <code>/budget</code> · optionally <code>/nomistakes on</code></td></tr>
+    </table>
+  </section>
+
+</main>
+
+<footer>
+  <span class="flogo">CHEEP!</span>
+  Single static binary · zero runtime dependencies · MIT licensed<br>
+  <a href="https://github.com/TedHaley/cheep">github.com/TedHaley/cheep</a> ·
+  <a href="index.html">back to cheep</a>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js" defer></script>
+<script>
+addEventListener("DOMContentLoaded", () => {
+  if (!window.gsap || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  gsap.registerPlugin(ScrollTrigger);
+  const intro = gsap.timeline();
+  intro.from(".hero .kicker, .hero h1, .hero .lede", {
+    y: 26, autoAlpha: 0, stagger: .12, duration: .8, ease: "power3.out" });
+  gsap.utils.toArray("[data-reveal]").forEach(el => {
+    gsap.from(el, { y: 30, autoAlpha: 0, duration: .8, ease: "power3.out",
+      scrollTrigger: { trigger: el, start: "top 88%" } });
+  });
+  /* animation is enhancement, never a gate (see index.html) */
+  function assertPlayed() {
+    if (document.hidden) {
+      document.addEventListener("visibilitychange", () => setTimeout(assertPlayed, 3200), { once: true });
+      return;
+    }
+    if (intro.progress() < 1) {
+      gsap.globalTimeline.clear();
+      ScrollTrigger.getAll().forEach(s => s.kill());
+      gsap.set("[data-reveal], .hero .kicker, .hero h1, .hero .lede", { clearProps: "all" });
+    }
+  }
+  setTimeout(assertPlayed, 3000);
+});
+</script>
+
+</body>
+</html>

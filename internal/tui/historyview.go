@@ -32,7 +32,8 @@ func (m *model) saveHistory() {
 		}
 	}
 	_ = history.Save(history.Record{
-		ID: m.histID, Started: m.histStarted, Updated: time.Now(),
+		ID: m.histID, Parent: m.histParent, ForkAt: m.histForkAt,
+		Started: m.histStarted, Updated: time.Now(),
 		Workdir: m.workdir, Title: m.histTitle, Messages: msgs,
 	})
 }
@@ -95,7 +96,11 @@ func (m model) resumeHistory(id string) (tea.Model, tea.Cmd) {
 	(&m).saveHistory() // keep the session we're leaving
 
 	m.histID, m.histStarted, m.histTitle = r.ID, r.Started, r.Title
-	orch, berr := orchestrator.Build(m.cfg, m.workdir, true, m.mode, m.extraOrch, m.extraExec, m.onEvent)
+	m.histParent, m.histForkAt = r.Parent, r.ForkAt
+	orch, berr := orchestrator.Build(m.cfg, m.workdir, orchestrator.Options{
+		Isolate: true, Mode: m.mode, ExtraOrch: m.extraOrch, ExtraExec: m.extraExec, OnEvent: m.onEvent,
+		Gate: m.gate,
+	})
 	m.buildErr = berr
 	if berr != nil {
 		m.session = nil

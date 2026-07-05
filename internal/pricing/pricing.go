@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TedHaley/cheep/internal/config"
+	"github.com/TedHaley/cheep/internal/core"
 )
 
 // Live prices are fetched from BerriAI/LiteLLM's maintained dataset, cached to
@@ -158,7 +159,8 @@ func IsLocal(provider, endpoint string) bool {
 // Rate returns per-1M-token input/output prices for a model name, preferring the
 // live LiteLLM dataset and falling back to the built-in table.
 func Rate(model string) (in, out float64, known bool) {
-	low := strings.ToLower(model)
+	base, _ := core.SplitThinking(model) // "sonnet:high" prices as "sonnet"
+	low := strings.ToLower(base)
 	if i, o, ok := lookupFetched(low); ok {
 		return i, o, true
 	}

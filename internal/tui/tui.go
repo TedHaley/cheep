@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,12 +28,15 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/TedHaley/cheep/internal/agent"
+	"github.com/TedHaley/cheep/internal/approve"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/history"
+	"github.com/TedHaley/cheep/internal/inflight"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/pricing"
+	"github.com/TedHaley/cheep/internal/prompts"
 	"github.com/TedHaley/cheep/internal/provider"
 )
 
@@ -51,6 +55,12 @@ type switchMsg struct {
 	err string
 }
 
+type cmdResultMsg struct {
+	cmd    string
+	stdout string
+	stderr string
+	exit   int
+}
 type tab struct {
 	id     string // agent name: "orchestrator" / "qwen-local#2"
 	title  string
@@ -93,20 +103,31 @@ type model struct {
 
 	openTodos    int  // non-done todos from the orchestrator's latest update_todos
 	delegated    bool // did the orchestrator call delegate this run?
+	stowing      bool // current run is a /stow; capture its reply as a run note
+	mouseOff     bool // mouse tracking released so the terminal can select/copy text
 	nudges       int  // auto-continue count since the last user message
 	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
 	budgetWarned bool // already warned at 80% of the budget cap this session
+	quitArmed    bool // first ctrl+c pressed while a task was running
 
 	pendingCfg config.Config // last config we tried to switch to (avoid re-verifying)
 
 	connectivity map[string]string // label -> "ok"/"unreachable"/"needs API key"
 	welcomeLen   int               // length of the initial banner block (for refresh)
 
+	ctxTokens  int               // orchestrator conversation size estimate (context bar)
 	usage      map[string][2]int // model -> {input, output} tokens this session
 	usageOrder []string          // models in first-seen order
 	usageRole  map[string][2]int // "orchestrator"/"executor" -> {input, output}
 
-	// overlay: "" (none) | "help" | "setup" | "setupwiz"
+	gate      *approve.Gate     // approval gating for shared-workspace tools
+	approvals []approve.Request // pending approval requests (FIFO)
+
+	comp       compState          // input completion dropdown (slash commands, @-files)
+	fileList   []string           // workspace files for @-mentions
+	promptTpls []prompts.Template // /name prompt templates (project + global)
+
+	// overlay: "" (none) | "help" | "setup" | "setupwiz" | "approval"
 	overlay string
 	ovTitle string
 	ovInput textinput.Model
@@ -122,8 +143,14 @@ type model struct {
 	histID      string
 	histStarted time.Time
 	histTitle   string
-	histList    []history.Meta // populated when the /history overlay is open
+	histParent  string         // session this one was forked from ("" = root)
+	histForkAt  int            // message index in the parent where this branch began
+	histList    []history.Meta // populated when the /history or /tree overlay is open
+	histDepth   []int          // tree depth per histList row (/tree only)
 	histCursor  int
+
+	forkPoints []int // message indices of user turns (the /fork overlay's rows)
+	forkCursor int
 }
 
 var (
@@ -137,6 +164,7 @@ var (
 	userSt      = lipgloss.NewStyle().Bold(true)
 	todoDoneSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	sepSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("238")) // dim gray for separator
 )
 
 // renderMarkdown renders assistant text as styled markdown, bulleted on line 1.
@@ -233,6 +261,18 @@ func todoHeaderLines(todos []todoItem) []string {
 	return out
 }
 
+// queueHeaderLines renders the queued messages as a sticky header.
+func queueHeaderLines(queued []string) []string {
+	if len(queued) == 0 {
+		return nil
+	}
+	out := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")).Render("Queued Tasks")}
+	for i, q := range queued {
+		out = append(out, "  "+hintSt.Render(fmt.Sprintf("%d. %s", i+1, short(q, 100))))
+	}
+	return out
+}
+
 func countOpenItems(todos []todoItem) int {
 	n := 0
 	for _, t := range todos {
@@ -260,6 +300,11 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 			p.Send(evMsg(e))
 		}
 	}()
+	go func() {
+		for r := range m.gate.Requests {
+			p.Send(approvalMsg{r})
+		}
+	}()
 	_, err := p.Run()
 	return err
 }
@@ -279,14 +324,21 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
+	gateMode, _ := approve.ParseMode(cfg.ApprovalMode)
+	if cfg.NoMistakes {
+		gateMode = approve.ModeApprove // no-mistakes implies the strictest gate
+	}
 	m := model{
-		cfg:       cfg,
-		workdir:   workdir,
-		mode:      orchestrator.ModeAuto,
-		extraOrch: extraOrch,
-		extraExec: extraExec,
-		keepTabs:  cfg.KeepTabs,
-		follow:    true,
+		cfg:        cfg,
+		workdir:    workdir,
+		gate:       approve.New(gateMode),
+		fileList:   loadFileList(workdir),
+		promptTpls: prompts.List(workdir),
+		mode:       orchestrator.ModeAuto,
+		extraOrch:  extraOrch,
+		extraExec:  extraExec,
+		keepTabs:   cfg.KeepTabs,
+		follow:     true,
 		onEvent: func(e core.Event) {
 			select {
 			case events <- e:
@@ -304,6 +356,17 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
 	(&m).rebuild(false)
+	// Surface delegations a previous cheep process left in flight (crash/kill):
+	// any work they produced survives on quarantined worktree branches.
+	for _, j := range inflight.Stale(workdir) {
+		line := errSt.Render("⚠ interrupted delegation") + hintSt.Render(" ("+j.Started.Local().Format("Jan 2 15:04")+
+			", "+j.Executor+"): "+short(strings.ReplaceAll(j.Subtask, "\n", " "), 80))
+		if j.Branch != "" {
+			line += hintSt.Render("  · partial work (if any) is on branch "+j.Branch) +
+				hintSt.Render("  · see `cheep worktree list`")
+		}
+		m.tabs[0].lines = append(m.tabs[0].lines, line)
+	}
 	if firstRun || needsSetup(m.cfg) {
 		// No config, the orchestrator can't run, or no executor is configured —
 		// cheep needs both roles, so open the configurator to set up the missing
@@ -402,11 +465,15 @@ func shortWorkdir() string {
 }
 
 func (m *model) rebuild(keep bool) {
+	m.promptTpls = prompts.List(m.workdir) // pick up new/edited templates
 	var hist []core.Message
 	if keep && m.session != nil {
 		hist = m.session.History()
 	}
-	orch, err := orchestrator.Build(m.cfg, m.workdir, true, m.mode, m.extraOrch, m.extraExec, m.onEvent)
+	orch, err := orchestrator.Build(m.cfg, m.workdir, orchestrator.Options{
+		Isolate: true, Mode: m.mode, ExtraOrch: m.extraOrch, ExtraExec: m.extraExec, OnEvent: m.onEvent,
+		Gate: m.gate,
+	})
 	m.buildErr = err
 	if err != nil {
 		m.session = nil
@@ -481,6 +548,33 @@ func probeCmd(cfg config.Config) tea.Cmd {
 	}
 }
 
+// bashCmd runs a shell command and returns the result as a cmdResultMsg.
+func bashCmd(cmdStr string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		var stdout, stderr strings.Builder
+		c.Stdout = &stdout
+		c.Stderr = &stderr
+		err := c.Run()
+		exit := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exit = exitErr.ExitCode()
+			} else {
+				exit = 1
+			}
+		}
+		return cmdResultMsg{
+			cmd:    cmdStr,
+			stdout: strings.TrimSpace(stdout.String()),
+			stderr: strings.TrimSpace(stderr.String()),
+			exit:   exit,
+		}
+	}
+}
+
 // relayout sizes the input to its content (1–6 lines) and gives the rest to the log.
 func (m *model) relayout() {
 	lines := strings.Count(m.input.Value(), "\n") + 1
@@ -494,7 +588,18 @@ func (m *model) relayout() {
 	m.input.CursorEnd()
 	header := 0
 	if len(m.tabs) > 0 {
-		header = len(todoHeaderLines(m.tabs[m.active].todos))
+		// Account for todos
+		todoLines := todoHeaderLines(m.tabs[m.active].todos)
+		if len(todoLines) > 0 {
+			header += len(todoLines)
+		}
+		// Account for queue header
+		if m.running && len(m.queue) > 0 {
+			queueLines := queueHeaderLines(m.queue)
+			if len(queueLines) > 0 {
+				header += len(queueLines)
+			}
+		}
 	}
 	m.vp.Height = max(3, m.h-4-lines-header) // tab bar + rule + rule + hint = 4
 }
@@ -517,9 +622,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		(&m).applyEvent(core.Event(msg))
 		return m, nil
 
+	case approvalMsg:
+		return m.pushApproval(msg.req)
+
 	case doneMsg:
 		m.running = false
 		m.cancel = nil
+		m.quitArmed = false
+		if m.stowing {
+			// /stow finished: its report becomes a durable run note; lessons
+			// were recorded by the agent via record_lesson during the turn.
+			m.stowing = false
+			if msg.r.Status == "completed" && strings.TrimSpace(msg.r.Output) != "" {
+				history.AppendRunNote(m.workdir, "**Stowed session "+m.histID+"**\n\n"+msg.r.Output)
+			}
+			(&m).saveHistory()
+			m.tabs[0].status = statusKey(msg.r.Status)
+			m.footer = "stowed — note in ~/.cheep/history/notes.md · /clear for a fresh start"
+			(&m).syncViewport()
+			return m, tea.SetWindowTitle("cheep ✓ stowed — " + filepath.Base(m.workdir))
+		}
+		// A finished/cancelled run can leave queued approvals nobody is
+		// waiting on (the gated calls unblocked via ctx.Done). Drop them.
+		if len(m.approvals) > 0 {
+			for _, r := range m.approvals {
+				select {
+				case r.Resp <- approve.Deny:
+				default:
+				}
+			}
+			m.approvals = nil
+			if m.overlay == "approval" {
+				m.overlay = ""
+			}
+		}
 		m.tabs[0].status = statusKey(msg.r.Status)
 		m.footer = fmt.Sprintf("%s · %d turns · %s in / %s out (this turn)", msg.r.Status, msg.r.Turns, human(msg.r.InputTokens), human(msg.r.OutputTokens))
 		if m.keepTabs {
@@ -531,6 +667,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		(&m).syncViewport()
 		(&m).saveHistory() // persist the conversation after every completed turn
+		if m.session != nil {
+			m.ctxTokens = agent.EstTokens(m.session.History())
+		}
 		// The orchestrator may have rewired cheep via the config tools. Verify the
 		// new orchestrator is reachable BEFORE switching to it (don't brick the
 		// session); applied in the switchMsg handler.
@@ -558,7 +697,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nudges, m.openTodos = 0, 0
 			return m.startTask(next)
 		}
-		return m, nil
+		mark := "✓"
+		if msg.r.Status != "completed" {
+			mark = "⚠"
+		}
+		return m, tea.SetWindowTitle("cheep " + mark + " " + msg.r.Status + " — " + filepath.Base(m.workdir))
 
 	case ovDoneMsg:
 		m.ovBusy = false
@@ -579,6 +722,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case cmdResultMsg:
+		m.running = false
+		if msg.exit == 0 {
+			m.tabs[0].status = "ok"
+			m.footer = "command exited 0"
+		} else {
+			m.tabs[0].status = "err"
+			m.footer = "command exited " + strconv.Itoa(msg.exit)
+		}
+		(&m).appendLine(0, hintSt.Render("stdout:"))
+		if msg.stdout != "" {
+			for _, l := range strings.Split(msg.stdout, "\n") {
+				(&m).appendLine(0, "  "+l)
+			}
+		}
+		if msg.stderr != "" {
+			(&m).appendLine(0, errSt.Render("stderr:"))
+			for _, l := range strings.Split(msg.stderr, "\n") {
+				(&m).appendLine(0, "  "+l)
+			}
+		}
+		m.active = 0
+		m.follow = true
+		(&m).syncViewport()
+		return m, nil
 	case switchMsg:
 		if msg.ok {
 			m.cfg = msg.cfg
@@ -608,8 +776,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.overlay != "" {
 			return m.updateOverlay(msg)
 		}
+		// The completion dropdown captures navigation keys while open.
+		if len(m.comp.opts) > 0 {
+			switch msg.String() {
+			case "up":
+				m.comp.idx = (m.comp.idx - 1 + len(m.comp.opts)) % len(m.comp.opts)
+				return m, nil
+			case "down":
+				m.comp.idx = (m.comp.idx + 1) % len(m.comp.opts)
+				return m, nil
+			case "tab":
+				(&m).acceptCompletion()
+				(&m).updateCompletions()
+				(&m).relayout()
+				return m, nil
+			case "enter":
+				if (&m).acceptCompletion() == "slash" {
+					return m.submit() // run the chosen command immediately
+				}
+				(&m).relayout()
+				return m, nil
+			case "esc":
+				m.comp = compState{}
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
+			// Don't tear down mid-run on a single keypress: agents may hold
+			// work that only lands at the merge boundary.
+			if m.running && !m.quitArmed {
+				m.quitArmed = true
+				m.footer = "a task is running — ctrl+c again to quit anyway (esc cancels the task first)"
+				return m, nil
+			}
 			(&m).saveHistory()
 			return m, tea.Quit
 		case "esc":
@@ -680,6 +880,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		(&m).updateCompletions()
 		(&m).relayout()
 		return m, cmd
 
@@ -742,9 +943,31 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(text, "/") {
 		return m.slash(text)
 	}
+	// Handle !<command> for inline shell execution (Claude Code style)
+	if strings.HasPrefix(text, "!") {
+		cmdStr := strings.TrimSpace(strings.TrimPrefix(text, "!"))
+		if cmdStr == "" {
+			m.footer = "usage: !<command>"
+			return m, nil
+		}
+		(&m).appendLine(0, hintSt.Render("🔧 "+cmdStr))
+		m.running = true
+		m.tabs[0].status = "run"
+		m.active = 0
+		m.follow = true
+		m.started = time.Now()
+		return m, tea.Batch(m.sp.Tick, bashCmd(cmdStr))
+	}
+	return m.sendUser(text, userSt.Render("› "+text))
+}
+
+// sendUser routes a user message to the orchestrator with the usual guards
+// (no session, task already running, over budget). display is the line shown
+// in the log — for prompt templates it is the typed /name, not the expansion.
+func (m model) sendUser(text, display string) (tea.Model, tea.Cmd) {
 	if m.session == nil {
 		// Show the message and a clear, actionable error in the conversation.
-		(&m).appendLine(0, userSt.Render("› "+text))
+		(&m).appendLine(0, display)
 		(&m).appendLine(0, errSt.Render("✗ can't run")+hintSt.Render(" — "+errText(m.buildErr)+"  ·  fix with /config or /setup"))
 		m.active = 0
 		m.follow = true
@@ -754,14 +977,14 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if m.running {
 		// Queue it — it runs automatically when the current task finishes.
 		m.queue = append(m.queue, text)
-		(&m).appendLine(0, userSt.Render("› "+text)+"  "+hintSt.Render("(queued)"))
+		(&m).appendLine(0, display+"  "+hintSt.Render("(queued)"))
 		m.active = 0
 		m.follow = true
 		(&m).syncViewport()
 		return m, nil
 	}
 	if m.overBudget() {
-		(&m).appendLine(0, userSt.Render("› "+text))
+		(&m).appendLine(0, display)
 		(&m).appendLine(0, errSt.Render("✗ over budget")+hintSt.Render(fmt.Sprintf(
 			" — %s of %s spent; raise or clear the cap with /budget", usd(m.spent()), usd(m.budget()))))
 		m.active, m.follow = 0, true
@@ -771,7 +994,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	m.nudges = 0
 	m.openTodos = 0
 	m.tabs[0].todos = nil // dismiss the previous task's checklist
-	return m.startTask(text)
+	return m.runMessage(text, display)
 }
 
 func (m model) startTask(text string) (tea.Model, tea.Cmd) {
@@ -792,8 +1015,25 @@ func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	s := m.session
 	run := func() tea.Msg { return doneMsg{s.SendCtx(ctx, text)} }
-	return m, tea.Batch(m.sp.Tick, run)
+	return m, tea.Batch(m.sp.Tick, run,
+		tea.SetWindowTitle("cheep ● working — "+filepath.Base(m.workdir)))
 }
+
+// stowPrompt sweeps session knowledge to disk before a reset (firstmate's
+// /stow): durable lessons via record_lesson, plus a structured handoff report
+// that cheep appends to the run notes.
+const stowPrompt = `Stow this session before a context reset. Do these now:
+1. For each durable lesson learned this session about how THIS project works (a convention,
+   a command, a gotcha the user corrected), call record_lesson once with one concise
+   sentence. Skip trivia. If record_lesson is unavailable, fold the lessons into the report.
+2. Then reply with a stow report in EXACTLY this structure:
+## Done
+- what was accomplished and verified
+## In flight
+- anything unfinished and where it stands (branches, failing checks, open questions)
+## Next steps
+- the concrete actions a fresh session should take first
+Keep it terse and factual — it is the handoff for a session with no memory of this one.`
 
 func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	switch strings.Fields(text)[0] {
@@ -817,6 +1057,34 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		} else {
 			(&m).closeTab(m.active)
 		}
+	case "/mouse":
+		m.mouseOff = !m.mouseOff
+		if m.mouseOff {
+			m.footer = "mouse OFF — select/copy text normally; scroll with pgup/pgdn · /mouse to re-enable"
+			return m, tea.DisableMouse
+		}
+		m.footer = "mouse ON — wheel scrolls tabs (hold Option/Shift to select text)"
+		return m, tea.EnableMouseCellMotion
+	case "/copy":
+		if m.session == nil {
+			m.footer = "nothing to copy yet"
+			return m, nil
+		}
+		text := ""
+		for _, msg := range m.session.History() {
+			if msg.Role == "assistant" && strings.TrimSpace(msg.Text) != "" {
+				text = msg.Text
+			}
+		}
+		if text == "" {
+			m.footer = "no reply to copy yet"
+			return m, nil
+		}
+		if err := clipboardCopy(text); err != nil {
+			m.footer = "copy failed: " + err.Error()
+		} else {
+			m.footer = fmt.Sprintf("copied the last reply (%d chars) to the clipboard", len(text))
+		}
 	case "/keeptabs":
 		m.keepTabs = !m.keepTabs
 		m.cfg.KeepTabs = m.keepTabs
@@ -833,14 +1101,111 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
 		m.active = 0
 		(&m).rebuild(false)
-		// start a fresh history session
+		// start a fresh history session (a new root, not a fork)
 		m.histStarted = time.Now()
-		m.histID = history.NewID(m.histStarted)
+		m.histID = history.UniqueID(m.histStarted)
 		m.histTitle = ""
+		m.histParent, m.histForkAt = "", 0
+		m.ctxTokens = 0
 		m.footer = "(cleared)"
 		(&m).syncViewport()
 	case "/history", "/resume":
 		return m.openHistory()
+	case "/fork":
+		return m.openFork()
+	case "/tree":
+		return m.openTree()
+	case "/stow":
+		if m.session == nil || len(m.session.History()) == 0 {
+			m.footer = "nothing to stow yet"
+			return m, nil
+		}
+		if m.running {
+			m.footer = "a task is running — stow when it finishes"
+			return m, nil
+		}
+		m.stowing = true
+		return m.sendUser(stowPrompt, hintSt.Render("⚓ stowing session knowledge to disk"))
+	case "/nomistakes", "/no-mistakes":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			state := "OFF"
+			if m.cfg.NoMistakes {
+				state = "ON"
+			}
+			m.footer = "no-mistakes: " + state + " — /nomistakes on|off (every write/command asks; merges need your sign-off)"
+			return m, nil
+		}
+		switch f[1] {
+		case "on":
+			m.cfg.NoMistakes = true
+			m.gate.SetMode(approve.ModeApprove)
+			_ = config.Save(m.cfg)
+			(&m).rebuild(true)
+			m.footer = "no-mistakes ON — shared writes/commands ask first, and nothing merges without your approval"
+		case "off":
+			m.cfg.NoMistakes = false
+			md, ok := approve.ParseMode(m.cfg.ApprovalMode)
+			if !ok {
+				md = approve.ModeAuto
+			}
+			m.gate.SetMode(md)
+			_ = config.Save(m.cfg)
+			(&m).rebuild(true)
+			m.footer = "no-mistakes OFF — approvals back to " + string(md) + ", merges are automatic again"
+		default:
+			m.footer = "usage: /nomistakes on|off"
+		}
+	case "/approval", "/approvals":
+		arg := ""
+		if f := strings.Fields(text); len(f) > 1 {
+			arg = f[1]
+		}
+		return m.setApprovalMode(arg)
+	case "/model":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			m.footer = "orchestrator model: " + m.cfg.Orchestrator.Model + " — /model <name> switches (conversation is kept)"
+			return m, nil
+		}
+		m.cfg.Orchestrator.Model = f[1]
+		if err := config.Save(m.cfg); err != nil {
+			m.footer = "model not saved: " + err.Error()
+			return m, nil
+		}
+		m.pendingCfg = m.cfg // skip the config-change re-verification round-trip
+		(&m).rebuild(true)   // history is threaded through, so context survives
+		if m.buildErr != nil {
+			m.footer = "model switch failed: " + errText(m.buildErr)
+		} else {
+			m.footer = "orchestrator now on " + f[1]
+		}
+	case "/delivery":
+		f := strings.Fields(text)
+		if len(f) < 2 {
+			mode := m.cfg.Delivery
+			if mode == "" {
+				mode = "merge"
+			}
+			m.footer = "delivery: " + mode + " — /delivery merge|pr switches how validated work lands"
+			return m, nil
+		}
+		switch f[1] {
+		case "merge", "pr":
+			m.cfg.Delivery = f[1]
+			if f[1] == "merge" {
+				m.cfg.Delivery = "" // default, keep config.json clean
+			}
+			_ = config.Save(m.cfg)
+			(&m).rebuild(true)
+			if f[1] == "pr" {
+				m.footer = "delivery: pr — validated subtask branches are pushed and opened as PRs (needs git remote + gh)"
+			} else {
+				m.footer = "delivery: merge — validated subtask branches merge into the local checkout"
+			}
+		default:
+			m.footer = "usage: /delivery merge|pr"
+		}
 	case "/budget":
 		f := strings.Fields(text)
 		switch {
@@ -879,6 +1244,11 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		for _, l := range m.tokenLines() {
 			m.appendLine(m.active, l)
 		}
+		if m.ctxTokens > 0 && m.cfg.Orchestrator.ContextBudget > 0 {
+			m.appendLine(m.active, hintSt.Render(fmt.Sprintf(
+				"  context: ~%s of %s est. tokens — auto-compacts at 100%%, squeezed-out memory saved to ~/.cheep/history/notes.md",
+				human(m.ctxTokens), human(m.cfg.Orchestrator.ContextBudget))))
+		}
 		m.follow = true
 		(&m).syncViewport()
 	case "/config":
@@ -887,7 +1257,27 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m.openSetup()
 	case "/help", "/?":
 		m.overlay = "help"
+	case "/prompts":
+		if len(m.promptTpls) == 0 {
+			m.footer = "no prompt templates — drop markdown files in .cheep/prompts/ or ~/.cheep/prompts/"
+			return m, nil
+		}
+		m.appendLine(m.active, hintSt.Render("prompt templates (invoke as /name [args]):"))
+		for _, t := range m.promptTpls {
+			line := "  /" + t.Name
+			if t.Description != "" {
+				line += hintSt.Render("  — " + t.Description)
+			}
+			m.appendLine(m.active, line)
+		}
+		m.follow = true
+		(&m).syncViewport()
 	default:
+		name := strings.TrimPrefix(strings.Fields(text)[0], "/")
+		if t, ok := prompts.Find(m.workdir, name); ok {
+			args := strings.TrimSpace(strings.TrimPrefix(text, "/"+name))
+			return m.sendUser(prompts.Expand(t, args), userSt.Render("› "+text))
+		}
 		m.footer = "unknown command " + strings.Fields(text)[0]
 	}
 	return m, nil
@@ -1015,6 +1405,10 @@ func (m *model) applyEvent(e core.Event) {
 	idx := m.tabFor(e.Agent)
 	t := m.tabs[idx]
 	switch e.Type {
+	case "progress":
+		if idx == 0 && e.Ctx > 0 {
+			m.ctxTokens = e.Ctx
+		}
 	case "lifecycle":
 		if e.Status == "start" {
 			t.status = "run"
@@ -1032,6 +1426,9 @@ func (m *model) applyEvent(e core.Event) {
 		}
 	case "text":
 		if strings.TrimSpace(e.Text) != "" {
+
+			// Add a visual separator between user input and assistant response
+			m.appendLine(idx, sepSt.Render(strings.Repeat("─", max(1, m.w-2))))
 			for _, l := range renderMarkdown(e.Text, m.w) {
 				m.appendLine(idx, l)
 			}
@@ -1115,7 +1512,15 @@ func (m model) View() string {
 	}
 	left := modeLabel(m.mode) + "   " + status
 	hint := left
-	if tok := hintSt.Render(m.tokenSummary()); tok != "" {
+	right := hintSt.Render(m.tokenSummary())
+	if cb := m.ctxBar(); cb != "" {
+		if right != "" {
+			right = cb + hintSt.Render("  ·  ") + right
+		} else {
+			right = cb
+		}
+	}
+	if tok := right; tok != "" {
 		gap := m.w - lipgloss.Width(left) - lipgloss.Width(tok)
 		if gap < 1 {
 			gap = 1
@@ -1128,6 +1533,16 @@ func (m model) View() string {
 	parts := []string{m.tabBar(), m.vp.View()}
 	if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
 		parts = append(parts, strings.Join(todos, "\n"))
+	}
+	// Show queued tasks below todos when running
+	if m.running && len(m.queue) > 0 {
+		queueLines := queueHeaderLines(m.queue)
+		if len(queueLines) > 0 {
+			parts = append(parts, strings.Join(queueLines, "\n"))
+		}
+	}
+	if comp := m.viewCompletions(); comp != "" {
+		parts = append(parts, comp)
 	}
 	parts = append(parts, rule, m.input.View(), rule, hint)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -1305,6 +1720,30 @@ func (m model) spent() float64 {
 		}
 	}
 	return total
+}
+
+// ctxBar renders the orchestrator's context fill against its compaction
+// budget: green → yellow (60%) → red (85%); compaction fires at 100%.
+func (m model) ctxBar() string {
+	budget := m.cfg.Orchestrator.ContextBudget
+	if budget <= 0 || m.ctxTokens <= 0 {
+		return ""
+	}
+	ratio := float64(m.ctxTokens) / float64(budget)
+	if ratio > 1 {
+		ratio = 1
+	}
+	const cells = 8
+	filled := int(ratio*cells + .5)
+	st := okSt
+	switch {
+	case ratio >= .85:
+		st = errSt
+	case ratio >= .6:
+		st = todoProgSt
+	}
+	return hintSt.Render("ctx ") + st.Render(strings.Repeat("▰", filled)) +
+		hintSt.Render(strings.Repeat("▱", cells-filled)) + hintSt.Render(fmt.Sprintf(" %d%%", int(ratio*100)))
 }
 
 // tokenSummary is the compact persistent counter (e.g. "Σ orch 13k · exec 81k · $0.07").

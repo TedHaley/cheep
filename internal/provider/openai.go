@@ -127,6 +127,7 @@ func (o *OpenAI) toNative(system string, messages []core.Message) []map[string]a
 }
 
 func (o *OpenAI) Complete(ctx context.Context, model, system string, messages []core.Message, tools []core.Tool) (core.Turn, error) {
+	model, level := core.SplitThinking(model)
 	var nativeTools []map[string]any
 	for _, t := range tools {
 		nativeTools = append(nativeTools, map[string]any{
@@ -140,6 +141,12 @@ func (o *OpenAI) Complete(ctx context.Context, model, system string, messages []
 		"model":      model,
 		"max_tokens": o.MaxTokens,
 		"messages":   o.toNative(system, messages),
+	}
+	// A ":low|:medium|:high" model suffix maps to reasoning_effort. Servers
+	// that don't know the field generally ignore it; it is only sent when the
+	// user opted in via the suffix.
+	if level != "" && level != "off" {
+		body["reasoning_effort"] = level
 	}
 	if len(nativeTools) > 0 {
 		body["tools"] = nativeTools

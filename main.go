@@ -6,11 +6,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/TedHaley/cheep/internal/agent"
@@ -19,9 +22,12 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 	"github.com/TedHaley/cheep/internal/mcp"
 	"github.com/TedHaley/cheep/internal/orchestrator"
+	"github.com/TedHaley/cheep/internal/piext"
 	"github.com/TedHaley/cheep/internal/pricing"
+	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tui"
+	"github.com/TedHaley/cheep/internal/validate"
 	"github.com/TedHaley/cheep/internal/worktree"
 
 	"golang.org/x/term"
@@ -67,6 +73,14 @@ func main() {
 		cmdSetup()
 	case "keys":
 		cmdKeys()
+	case "worktree":
+		cmdWorktree(os.Args[2:])
+	case "init":
+		cmdInit(os.Args[2:])
+	case "validate":
+		cmdValidate(os.Args[2:])
+	case "pi":
+		cmdPi(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("cheep %s\n", version)
 	case "-h", "--help", "help":
@@ -83,11 +97,26 @@ func usage() {
 
 Usage:
   cheep                          start the interactive shell (default)
-  cheep run "<task>" [--workdir] run a single task non-interactively
+  cheep run "<task>" [--workdir] [--json]
+                                 run a single task non-interactively; --json
+                                 streams JSONL events for scripting/CI
   cheep check                    ping the orchestrator and every executor
   cheep config [show|path]       set up or inspect your agents (manual wizard)
   cheep setup                    configure agents by chatting with a working one
   cheep keys                     show the key store (~/.cheep/keys.env)
+  cheep init [--force] [--no-assist]
+                                 set up the current project for agentic work:
+                                 AGENTS.md (+ CLAUDE.md link), detected
+                                 validation checks, git init, toolbelt skill
+  cheep validate [--review] [--json]
+                                 run the project's AGENTS.md '## Validation'
+                                 checks (and optionally a fresh-context AI
+                                 review of the branch diff); exits 0 on pass
+  cheep worktree <acquire|release|list> [--json]
+                                 manage the pooled git worktrees (toolbelt for
+                                 other harnesses; cheep uses the pool itself)
+  cheep pi <add|remove|list>     run pi coding-agent extensions (pi.dev): their
+                                 registered tools join the agents' tool set
   cheep version                  print the version
 
 On first use, cheep walks you through choosing an orchestrator and, optionally,
@@ -119,12 +148,83 @@ func ensureConfig() config.Config {
 
 // ---- interactive shell ----------------------------------------------------
 
-// startMCP launches configured MCP servers and returns their role-scoped tools +
-// a session to close on exit. Errors are reported but never fatal.
+// startMCP launches configured MCP servers (plus the pi-extension bridge when
+// pi_extensions is set) and returns their role-scoped tools + a session to
+// close on exit. Errors are reported but never fatal.
 func startMCP(cfg config.Config) (mcp.Tools, *mcp.Session) {
-	return mcp.Start(cfg.MCP, func(e core.Event) {
+	servers := cfg.MCP
+	if s, err := piext.Server(cfg.PiExtensions); err != nil {
+		fmt.Fprintf(os.Stderr, "%spi extensions disabled: %v%s\n", cDim, err, cReset)
+	} else if s != nil {
+		merged := map[string]mcp.Server{}
+		for k, v := range servers {
+			merged[k] = v
+		}
+		name := "pi"
+		if _, taken := merged[name]; taken {
+			name = "pi_ext"
+		}
+		merged[name] = *s
+		servers = merged
+	}
+	return mcp.Start(servers, func(e core.Event) {
 		fmt.Fprintf(os.Stderr, "%s%s%s\n", cDim, e.Status, cReset)
 	})
+}
+
+// cmdPi manages pi coding-agent extensions run through the bundled bridge.
+func cmdPi(args []string) {
+	usage := func() {
+		fmt.Print(`cheep pi — run pi coding-agent extensions (pi.dev) inside cheep.
+
+Usage:
+  cheep pi add <npm-package|path>   install an extension and register it
+  cheep pi remove <npm-package|path>
+  cheep pi list                     show registered extensions
+
+Only the TOOLS an extension registers cross the bridge; pi event hooks,
+commands, and custom UI need pi's own runtime and are skipped.
+`)
+	}
+	if len(args) == 0 {
+		usage()
+		return
+	}
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		if err := piext.Add(args[1]); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%s✓%s %s registered — its tools load on the next cheep start\n", cGreen, cReset, args[1])
+	case "remove", "rm":
+		if len(args) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		if err := piext.Remove(args[1]); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%s✓%s %s removed\n", cGreen, cReset, args[1])
+	case "list", "ls":
+		cfg, err := config.Load()
+		if err != nil {
+			fatal(err)
+		}
+		if len(cfg.PiExtensions) == 0 {
+			fmt.Println("no pi extensions registered — add one with `cheep pi add <npm-package>`")
+			return
+		}
+		for _, e := range cfg.PiExtensions {
+			fmt.Println("  " + e)
+		}
+	default:
+		usage()
+		os.Exit(2)
+	}
 }
 
 func cmdChat() {
@@ -169,7 +269,9 @@ func lineREPL(cfg config.Config, workdir string, extraOrch, extraExec []core.Too
 		if keepHistory && session != nil {
 			hist = session.History()
 		}
-		orch, err := orchestrator.Build(cfg, workdir, true, mode, extraOrch, extraExec, onEvent)
+		orch, err := orchestrator.Build(cfg, workdir, orchestrator.Options{
+			Isolate: true, Mode: mode, ExtraOrch: extraOrch, ExtraExec: extraExec, OnEvent: onEvent,
+		})
 		buildErr = err
 		if err != nil {
 			session = nil
@@ -512,24 +614,303 @@ func cmdRun(argv []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	workdir := fs.String("workdir", ".", "workspace directory the agents operate in")
 	isolate := fs.Bool("isolate", true, "run each parallel subtask in its own git worktree (if workdir is a git repo)")
-	_ = fs.Parse(argv)
+	asJSON := fs.Bool("json", false, "emit JSONL events on stdout (human chrome goes to stderr)")
+	// Go's flag package stops at the first positional, but the documented
+	// shape is `cheep run "<task>" [--flags]` — so partition args ourselves.
+	var flags, positional []string
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if name == "workdir" && !strings.Contains(a, "=") && i+1 < len(argv) {
+				i++
+				flags = append(flags, argv[i])
+			}
+			continue
+		}
+		positional = append(positional, a)
+	}
+	_ = fs.Parse(flags)
 
-	task := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	task := strings.TrimSpace(strings.Join(positional, " "))
 	if task == "" {
-		fatal(fmt.Errorf(`no task provided — try: cheep run "fix the failing test"`))
+		fmt.Fprintln(os.Stderr, `cheep: no task provided — try: cheep run "fix the failing test"`)
+		os.Exit(2)
 	}
 
 	cfg := ensureConfig()
 	mt, mcpSess := startMCP(cfg)
 	defer mcpSess.Close()
-	orch, err := orchestrator.Build(cfg, *workdir, *isolate, orchestrator.ModeAuto, mt.Orchestrator, mt.Executor, printer())
+
+	// --json: one {"type":"event",...} line per core.Event on stdout, then a
+	// final {"type":"result",...} line. Treat this shape as a public API.
+	onEvent := printer()
+	if *asJSON {
+		var mu sync.Mutex
+		enc := json.NewEncoder(os.Stdout)
+		onEvent = func(e core.Event) {
+			mu.Lock()
+			defer mu.Unlock()
+			_ = enc.Encode(map[string]any{"type": "event", "ts": time.Now().UTC().Format(time.RFC3339), "event": e})
+		}
+	}
+
+	orch, err := orchestrator.Build(cfg, *workdir, orchestrator.Options{
+		Isolate: *isolate, Mode: orchestrator.ModeAuto, ExtraOrch: mt.Orchestrator, ExtraExec: mt.Executor, OnEvent: onEvent,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%scheep: %v%s\n", cRed, err, cReset)
+		os.Exit(2)
+	}
+	if !*asJSON {
+		fmt.Println("──────────── cheep ────────────")
+	}
+	r := orch.Run(task)
+	if *asJSON {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"type": "result", "status": r.Status, "output": r.Output, "turns": r.Turns,
+			"input_tokens": r.InputTokens, "output_tokens": r.OutputTokens,
+		})
+	} else {
+		fmt.Println("──────────── done ────────────")
+		fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+	}
+	if r.Status != "completed" {
+		os.Exit(1)
+	}
+}
+
+// ---- init -------------------------------------------------------------------
+
+// cmdInit is the project launchpad: deterministic scaffolding first (AGENTS.md
+// with detected checks, CLAUDE.md symlink, toolbelt skill, git init), then an
+// optional agent-assisted pass that explores the repo and rewrites the
+// template's prose sections to be accurate.
+func cmdInit(argv []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	dir := fs.String("dir", ".", "project directory")
+	force := fs.Bool("force", false, "overwrite an existing AGENTS.md")
+	noAssist := fs.Bool("no-assist", false, "skip the agent-assisted rewrite of AGENTS.md")
+	_ = fs.Parse(argv)
+	tty := term.IsTerminal(int(os.Stdin.Fd()))
+
+	if !worktree.IsRepo(*dir) {
+		ok := true
+		if tty {
+			fmt.Print("Not a git repository — run `git init`? [Y/n] ")
+			var ans string
+			fmt.Scanln(&ans)
+			ok = ans == "" || strings.HasPrefix(strings.ToLower(ans), "y")
+		}
+		if ok {
+			if out, err := exec.Command("git", "-C", *dir, "init").CombinedOutput(); err != nil {
+				fatal(fmt.Errorf("git init: %s", strings.TrimSpace(string(out))))
+			}
+			fmt.Println("initialized git repository")
+		}
+	}
+
+	detected := project.DetectCommands(*dir)
+	wrote, err := project.Scaffold(*dir, detected, *force)
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Println("──────────── cheep ────────────")
-	r := orch.Run(task)
-	fmt.Println("──────────── done ────────────")
-	fmt.Printf("Status: %s | tokens in=%d out=%d\n", r.Status, r.InputTokens, r.OutputTokens)
+	for _, w := range wrote {
+		fmt.Println("wrote", w)
+	}
+	if len(wrote) == 0 {
+		fmt.Println("nothing to scaffold (files exist — use --force to regenerate AGENTS.md)")
+	}
+
+	if *noAssist || !tty {
+		fmt.Println("\nNext: fill in AGENTS.md's Overview and Conventions, and verify the checks under '## Validation'.")
+		return
+	}
+
+	// Agent-assisted pass: a solo agent (executors stripped — this is quick
+	// investigative work, not a fleet job) explores the repo and rewrites the
+	// template prose. Reuses the normal Build machinery end to end.
+	fmt.Println("\nExploring the project to fill in AGENTS.md (ctrl-c to skip)…")
+	cfg := ensureConfig()
+	cfg.Executors = nil
+	orch, err := orchestrator.Build(cfg, *dir, orchestrator.Options{
+		Mode: orchestrator.ModeAuto, OnEvent: printer(),
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sskipping assisted pass: %v%s\n", cYellow, err, cReset)
+		return
+	}
+	r := orch.Run(`Explore this repository (read key files, directory layout, build/config files),
+then rewrite AGENTS.md so its prose matches reality:
+- Replace the Overview comment with 2-4 sentences on what the project is and how it's structured.
+- Make "## Build & Run" accurate, including any required setup.
+- Verify each command in "## Validation" actually works here; fix or remove wrong ones and keep
+  the fenced check-block format exactly (they are machine-parsed).
+- Note real conventions you can see in the code under "## Conventions".
+- Keep "## Lessons" and the overall section structure intact.
+Do not invent facts you cannot verify from the files.`)
+	if r.Status != "completed" {
+		fmt.Fprintf(os.Stderr, "%sassisted pass ended: %s%s\n", cYellow, r.Status, cReset)
+	}
+	fmt.Println("\nProject initialized. Review AGENTS.md, then run `cheep validate` to confirm the checks.")
+}
+
+// ---- validate ---------------------------------------------------------------
+
+// cmdValidate runs the validation pipeline headlessly against the current
+// directory: the AGENTS.md '## Validation' checks, plus (with --review) the
+// same fresh-context reviewer cheep uses before merging subtask worktrees.
+// Exit codes: 0 pass, 1 fail, 2 usage/config error. Other harnesses shell out
+// to this — keep the --json shape stable.
+func cmdValidate(argv []string) {
+	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+	dir := fs.String("dir", ".", "directory to validate")
+	review := fs.Bool("review", false, "also run a fresh-context AI review of the diff against --base")
+	base := fs.String("base", "", "ref to diff against for --review (default: merge-base with the default branch)")
+	asJSON := fs.Bool("json", false, "machine-readable result")
+	_ = fs.Parse(argv)
+
+	proj := project.Load(*dir)
+	if len(proj.Checks) == 0 && !*review {
+		fmt.Fprintln(os.Stderr, "cheep: no checks declared — add a '## Validation' section to AGENTS.md (see cheep init)")
+		os.Exit(2)
+	}
+
+	runner := validate.Runner{Checks: proj.Checks}
+	baseRef := *base
+	if *review {
+		cfg := ensureConfig()
+		runner.Reviewer = orchestrator.NewReviewer(cfg, printer())
+		runner.Strict = cfg.Validation.Strict
+		if runner.Reviewer == nil {
+			fmt.Fprintln(os.Stderr, "cheep: no usable reviewer model configured")
+			os.Exit(2)
+		}
+		if baseRef == "" {
+			baseRef = defaultBase(*dir)
+			if baseRef == "" {
+				fmt.Fprintln(os.Stderr, "cheep: cannot determine a base ref for --review; pass --base")
+				os.Exit(2)
+			}
+		}
+	}
+	if !*asJSON {
+		runner.OnEvent = printer()
+	}
+
+	res := runner.Run(context.Background(), *dir, baseRef)
+	if *asJSON {
+		b, _ := json.MarshalIndent(res, "", "  ")
+		fmt.Println(string(b))
+	} else {
+		for _, c := range res.Checks {
+			mark := "✓"
+			if c.Exit != 0 {
+				mark = "✗"
+			}
+			fmt.Printf("%s %s (exit %d)\n", mark, c.Name, c.Exit)
+		}
+		if res.Review != nil {
+			fmt.Printf("review: %s %s\n", res.Review.Verdict, res.Review.Summary)
+			for _, i := range res.Review.Issues {
+				fmt.Printf("  - [%s] %s %s\n", i.Severity, i.Description, i.File)
+			}
+		}
+		if res.Note != "" {
+			fmt.Println("note:", res.Note)
+		}
+	}
+	if !res.Passed {
+		os.Exit(1)
+	}
+}
+
+// defaultBase finds the merge-base of HEAD with the repo's default branch
+// (origin/HEAD, falling back to main/master), or "" when none applies.
+func defaultBase(dir string) string {
+	try := func(args ...string) string {
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+	for _, ref := range []string{try("symbolic-ref", "--short", "refs/remotes/origin/HEAD"), "main", "master"} {
+		if ref == "" {
+			continue
+		}
+		if mb := try("merge-base", "HEAD", ref); mb != "" {
+			return mb
+		}
+	}
+	return ""
+}
+
+// ---- worktree ---------------------------------------------------------------
+
+// cmdWorktree is the headless pool interface, usable by other harnesses:
+//
+//	cheep worktree acquire --name fix-login [--json]   → prints the worktree path
+//	cheep worktree release --path <p> [--landed]
+//	cheep worktree list [--json]
+//
+// CLI acquires hold a lease in the slot's state file (a process that exits
+// can't hold a flock); release it with `cheep worktree release`.
+func cmdWorktree(argv []string) {
+	if len(argv) == 0 {
+		fatal(fmt.Errorf("usage: cheep worktree <acquire|release|list> [flags]"))
+	}
+	sub, rest := argv[0], argv[1:]
+	fs := flag.NewFlagSet("worktree", flag.ExitOnError)
+	repo := fs.String("repo", ".", "repository the pool belongs to")
+	name := fs.String("name", "task", "short task name used in the branch name")
+	path := fs.String("path", "", "slot path (release)")
+	landed := fs.Bool("landed", false, "the slot's work is merged/landed (release)")
+	asJSON := fs.Bool("json", false, "machine-readable output")
+	_ = fs.Parse(rest)
+
+	pool, err := worktree.OpenPool(*repo)
+	if err != nil {
+		fatal(err)
+	}
+	switch sub {
+	case "acquire":
+		t, err := pool.Acquire(*name, int(time.Now().Unix()%100000), true)
+		if err != nil {
+			fatal(err)
+		}
+		if *asJSON {
+			b, _ := json.Marshal(map[string]string{"path": t.Path, "branch": t.Branch, "base": t.Base})
+			fmt.Println(string(b))
+		} else {
+			fmt.Println(t.Path)
+		}
+	case "release":
+		if *path == "" {
+			fatal(fmt.Errorf("release needs --path"))
+		}
+		if err := pool.ReleaseByPath(*path, *landed); err != nil {
+			fatal(err)
+		}
+		fmt.Fprintln(os.Stderr, "released")
+	case "list":
+		slots := pool.List()
+		if *asJSON {
+			b, _ := json.MarshalIndent(slots, "", "  ")
+			fmt.Println(string(b))
+			return
+		}
+		if len(slots) == 0 {
+			fmt.Println("no slots yet")
+			return
+		}
+		for _, s := range slots {
+			fmt.Printf("%-12s %-30s %s\n", s.State, s.Branch, s.Path)
+		}
+	default:
+		fatal(fmt.Errorf("unknown worktree subcommand %q", sub))
+	}
 }
 
 // ---- check ----------------------------------------------------------------

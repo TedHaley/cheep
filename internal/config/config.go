@@ -50,6 +50,10 @@ type Config struct {
 	// on a more capable executor). Escalation is on by default.
 	DisableEscalate bool `json:"disable_escalate,omitempty"`
 
+	// DisablePool turns off pooled worktree reuse; every subtask then gets a
+	// fresh temporary worktree (pre-pool behavior).
+	DisablePool bool `json:"disable_pool,omitempty"`
+
 	// BudgetUSD caps estimated session spend in US dollars (0 = no cap). cheep
 	// warns at 80% and stops the run at 100%.
 	BudgetUSD float64 `json:"budget_usd,omitempty"`
@@ -57,6 +61,50 @@ type Config struct {
 	// Budgets caps spend per project, keyed by absolute working directory. A
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
+
+	// PiExtensions are pi coding-agent extensions (https://pi.dev) to run via
+	// the bundled Node bridge: npm package names installed with `cheep pi add`,
+	// or local paths. Their registered tools join the agents' tool set like any
+	// MCP server's.
+	PiExtensions []string `json:"pi_extensions,omitempty"`
+
+	// NoMistakes is firstmate's strictest safety mode: every shared write and
+	// shell command asks first, and NOTHING merges into the local checkout
+	// until the user approves the branch diff. Headless runs (no approver)
+	// keep all work on branches.
+	NoMistakes bool `json:"no_mistakes,omitempty"`
+
+	// Delivery is how validated worktree changes land: "merge" (default) merges
+	// them into the local checkout; "pr" pushes each subtask branch and opens a
+	// pull request with the gh CLI instead.
+	Delivery string `json:"delivery,omitempty"`
+
+	// ApprovalMode gates risky tool calls in the shared workspace:
+	// "yolo" (nothing), "auto" (file writes ask; default), "approve"
+	// (writes and shell commands ask). Worktree work is never gated.
+	ApprovalMode string `json:"approval_mode,omitempty"`
+
+	// Validation configures the pre-merge pipeline run on each delegated
+	// subtask's worktree (checks from AGENTS.md '## Validation', then a
+	// fresh-context review). Zero value = enabled with defaults.
+	Validation Validation `json:"validation,omitempty"`
+
+	// Reviewer optionally overrides which model reviews branch diffs during
+	// validation; nil uses the orchestrator's provider/model.
+	Reviewer *Agent `json:"reviewer,omitempty"`
+}
+
+// Validation configures the pre-merge validation pipeline.
+type Validation struct {
+	// Disable skips the whole pipeline (pre-validation behavior).
+	Disable bool `json:"disable,omitempty"`
+	// MaxFixRounds bounds repair loops per subtask (default 2).
+	MaxFixRounds int `json:"max_fix_rounds,omitempty"`
+	// SkipReview keeps the checks but drops the reviewer agent (cheaper).
+	SkipReview bool `json:"skip_review,omitempty"`
+	// Strict makes reviewer failures (unparseable verdict, errors) block the
+	// merge instead of falling open.
+	Strict bool `json:"strict,omitempty"`
 }
 
 // Budget resolves the active budget for a working directory: the per-project

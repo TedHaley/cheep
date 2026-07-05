@@ -41,6 +41,10 @@ type Agent struct {
 	OnEvent       core.EventFunc
 	LoopWindow    int
 
+	// CompactNote, when set, receives every compaction summary so squeezed-out
+	// context can be persisted as durable memory (e.g. the run notes).
+	CompactNote func(summary string)
+
 	byName map[string]core.Tool
 }
 
@@ -96,8 +100,9 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 	a := s.a
 	s.messages = append(s.messages, core.Message{Role: "user", Text: userText})
 	inTok, outTok := 0, 0
-	emptyNudges := 0    // times we re-prompted an empty turn (small models stop after a tool)
-	var recent []string // tool-call signatures, for stuck detection
+	emptyNudges := 0         // times we re-prompted an empty turn (small models stop after a tool)
+	overflowRetried := false // one compact-and-retry per Send when the window overflows
+	var recent []string      // tool-call signatures, for stuck detection
 
 	for turn := 1; turn <= a.MaxTurns; turn++ {
 		if st := ctxStatus(ctx); st != "" {
@@ -110,6 +115,17 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 			if st := ctxStatus(ctx); st != "" {
 				return s.result(st, inTok, outTok, turn)
 			}
+			// The model's real context window can be far smaller than
+			// CompactBudget (local models): on an overflow rejection, compact
+			// aggressively (chunked, so the summarizer can't overflow either)
+			// and retry once.
+			if !overflowRetried && isContextError(err) {
+				overflowRetried = true
+				a.emit(core.Event{Type: "status", Status: "context window overflow — compacting and retrying"})
+				if s.compact(ctx, 4, true) {
+					continue
+				}
+			}
 			a.emit(core.Event{Type: "error", Text: err.Error()})
 			return RunResult{Status: "error", Output: "provider error: " + err.Error(),
 				Turns: turn, InputTokens: inTok, OutputTokens: outTok}
@@ -118,7 +134,7 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 		outTok += res.OutputTokens
 		msg := res.Message
 		s.messages = append(s.messages, msg)
-		a.emit(core.Event{Type: "progress", Turn: turn, Tokens: inTok})
+		a.emit(core.Event{Type: "progress", Turn: turn, Tokens: inTok, Ctx: EstTokens(s.messages)})
 		a.emit(core.Event{Type: "usage", Model: a.Model, InTok: res.InputTokens, OutTok: res.OutputTokens})
 		if msg.Text != "" {
 			a.emit(core.Event{Type: "text", Text: msg.Text})
@@ -192,13 +208,23 @@ func (s *Session) result(status string, inTok, outTok, turns int) RunResult {
 // maybeCompact summarizes and replaces the older part of the history when the
 // estimated context exceeds CompactBudget, keeping recent turns intact.
 func (s *Session) maybeCompact(ctx context.Context) {
-	a := s.a
-	if a.CompactBudget <= 0 || estTokens(s.messages) <= a.CompactBudget {
+	if s.a.CompactBudget <= 0 || EstTokens(s.messages) <= s.a.CompactBudget {
 		return
 	}
-	const keepRecent = 8
+	s.compact(ctx, 8, false)
+}
+
+const compactInstruction = "Summarize the earlier part of this conversation into a concise brief, preserving decisions, facts, file changes, executor results, and open tasks."
+
+// compact summarizes and replaces everything but the last keepRecent messages.
+// chunked summarizes the prefix in bounded pieces (for use right after the
+// provider rejected the full history — the summarizer must fit too). The
+// summary replaces the prefix in-context and is handed to CompactNote so the
+// squeezed-out memory survives on disk. Reports whether it compacted.
+func (s *Session) compact(ctx context.Context, keepRecent int, chunked bool) bool {
+	a := s.a
 	if len(s.messages) <= keepRecent+2 {
-		return
+		return false
 	}
 	// Cut at a turn boundary: an assistant message whose predecessor is a tool
 	// result or user message, so prefix and suffix are each self-contained.
@@ -212,15 +238,66 @@ func (s *Session) maybeCompact(ctx context.Context) {
 		}
 	}
 	if cut < 1 {
-		return
+		return false
 	}
-	summary := summarize(ctx, a.Provider, a.Model, s.messages[:cut],
-		"Summarize the earlier part of this conversation into a concise brief, preserving decisions, facts, file changes, executor results, and open tasks.")
+	var summary string
+	if chunked {
+		summary = summarizeChunked(ctx, a.Provider, a.Model, s.messages[:cut])
+	} else {
+		summary = summarize(ctx, a.Provider, a.Model, s.messages[:cut], compactInstruction)
+	}
 	if summary == "" {
-		return
+		return false
 	}
 	a.emit(core.Event{Type: "status", Status: "compacted context"})
+	if a.CompactNote != nil {
+		a.CompactNote(summary)
+	}
 	s.messages = append([]core.Message{{Role: "user", Text: "[Earlier conversation summary]\n" + summary}}, s.messages[cut:]...)
+	return true
+}
+
+// summarizeChunked summarizes msgs in pieces small enough that each summarize
+// call is far below the history size that just overflowed the window.
+func summarizeChunked(ctx context.Context, p core.Provider, model string, msgs []core.Message) string {
+	limit := EstTokens(msgs)/4 + 2000
+	var parts []string
+	var chunk []core.Message
+	flush := func() {
+		if len(chunk) == 0 {
+			return
+		}
+		if chunk[0].Role != "user" { // keep role alternation valid for strict providers
+			chunk = append([]core.Message{{Role: "user", Text: "[conversation fragment continues]"}}, chunk...)
+		}
+		if s := summarize(ctx, p, model, chunk, compactInstruction); s != "" {
+			parts = append(parts, s)
+		}
+		chunk = nil
+	}
+	for _, m := range msgs {
+		chunk = append(chunk, m)
+		if EstTokens(chunk) >= limit {
+			flush()
+		}
+	}
+	flush()
+	return strings.Join(parts, "\n\n")
+}
+
+// isContextError reports whether a provider rejection looks like a context
+// window overflow (wordings vary: OpenAI, Anthropic, LM Studio, llama.cpp).
+func isContextError(err error) bool {
+	e := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"context length", "context window", "maximum context", "context size",
+		"prompt is too long", "too many tokens", "exceeds the model",
+	} {
+		if strings.Contains(e, sig) {
+			return true
+		}
+	}
+	return strings.Contains(e, "context") && strings.Contains(e, "exceed")
 }
 
 // summarize runs one tool-less completion to summarize a conversation. The
@@ -306,7 +383,9 @@ func lastText(msgs []core.Message) string {
 	return ""
 }
 
-func estTokens(msgs []core.Message) int {
+// EstTokens estimates the token size of a conversation (chars/4 heuristic) —
+// the same measure that drives self-compaction, exported for the context bar.
+func EstTokens(msgs []core.Message) int {
 	chars := 0
 	for _, m := range msgs {
 		chars += len(m.Text)

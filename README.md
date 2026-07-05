@@ -51,6 +51,31 @@ you can use it for both roles. Then you get an interactive prompt:
 Type a task and the orchestrator plans, delegates, verifies, and reports back. Reopen the
 configurator any time with `/config`.
 
+## Project launchpad & validation
+
+cheep is also the entry point for setting up any project for agentic work:
+
+```sh
+cheep init                # AGENTS.md (+ CLAUDE.md link), detected validation checks,
+                          # git init, and a toolbelt skill for other harnesses
+cheep validate [--review] # run the AGENTS.md '## Validation' checks (+ optional
+                          # fresh-context AI review of your branch diff); exit 0 = pass
+cheep worktree …          # pooled, artifact-warm git worktrees for parallel work
+```
+
+Every agent's prompt carries your global `~/AGENTS.md` and the project's
+`AGENTS.md`; corrections you give are written back to its `## Lessons` section
+via the `record_lesson` tool. Delegated subtasks are validated (checks + a
+fresh-context reviewer with bounded fix rounds) **before** their worktree
+merges; failed work stays on its branch, never lost. These files use the open
+AGENTS.md / Agent Skills standards, so Claude Code, Codex, and friends read
+the same setup — and can shell out to `cheep validate` / `cheep worktree` via
+the bundled skill. Skills load project-first from `.agents/skills` and
+`.claude/skills`, then `~/.claude/skills` and `~/.cheep/skills` (SKILL.md
+directories or flat `.md` files). Steer which executor gets which kind of
+work with natural-language rules in `.cheep/dispatch.json`, and gate risky
+tool calls with `/approval yolo|auto|approve` (file writes preview as diffs).
+
 ## Configuration
 
 cheep keeps everything in its home directory, **`~/.cheep/`** (override with `CHEEP_HOME`):
@@ -145,14 +170,20 @@ cheep check               # pings the orchestrator and every executor
 | `cheep check` | Ping the orchestrator and every executor |
 | `cheep config [show\|path]` | Set up or inspect your agents (line-based CLI wizard) |
 | `cheep keys` | Show/create the key store |
+| `cheep pi <add\|remove\|list>` | Run [pi](https://pi.dev) coding-agent extensions inside cheep (see below) |
 | `cheep version` | Print the version |
 
 ### Slash commands (in the shell)
 
 `/config` (discovery configurator) · `/setup` (configure by chatting) · `/history` (browse
-and resume past conversations) · `/tokens` (tokens **and estimated $** per model, with local savings) · `/status`
-(current setup) · `/keeptabs` (toggle auto-closing finished executor tabs) · `/close` or
-`Ctrl+W` (close the focused executor tab) · `/clear` · `/help` · `/exit`.
+and resume past conversations) · `/fork` (branch the conversation from an earlier turn) ·
+`/tree` (navigate the session tree) · `/prompts` (list `/name` prompt templates) · `/stow`
+(sweep lessons + a handoff note to disk before a reset) · `/delivery` (how validated work
+lands: `merge` or `pr`) · `/tokens` (tokens **and estimated $** per model, with local
+savings) · `/status` (current setup) · `/keeptabs` (toggle auto-closing finished executor
+tabs) · `/copy` (copy the last reply to the clipboard) · `/mouse` (release the mouse so
+text selects normally) · `/close` or `Ctrl+W` (close the focused executor tab) · `/clear` ·
+`/help` · `/exit`.
 
 ### Modes
 
@@ -175,11 +206,82 @@ turn** by default — toggle with `/keeptabs`, or close the focused one with `Ct
 A persistent **token counter** shows orchestrator vs executor usage and flags local tokens as
 free. When stdin isn't a terminal (pipes/CI), cheep falls back to a simple line-based mode.
 
-### Chat history
+### Chat history & the session tree
 
 Every conversation is saved to `~/.cheep/history/` — a JSON record (used to resume into the
 agent's context) plus a human-readable Markdown transcript. Press `/history` (or `/resume`)
 to browse past sessions and reopen one where you left off.
+
+Sessions form a **tree**: `/fork` branches the current conversation from any earlier user
+turn — everything before it is kept, the abandoned tail stays on the old branch — so you can
+try an alternative approach without re-paying for the shared context. `/tree` shows every
+session with forks nested under their parent; pick one to switch.
+
+### Prompt templates
+
+Reusable prompts are markdown files in `.cheep/prompts/*.md` (project) or
+`~/.cheep/prompts/*.md` (global; a project file shadows a global one of the same name),
+invoked as `/name args...`. `$ARGUMENTS` expands to everything after the name, `$1..$9` to
+individual arguments; optional front-matter (`description:`) labels the autocomplete entry.
+`/prompts` lists what's available.
+
+### Scout vs ship subtasks
+
+The orchestrator marks each delegated subtask `"ship"` (delivers file changes through the
+usual validate-and-merge machinery) or `"scout"` (investigation, audit, research, planning).
+A scout's file changes are **discarded**; its findings come back directly and are saved as a
+report under `~/.cheep/reports/` — no merge machinery runs, so cheap-model research gets
+even cheaper.
+
+### No-mistakes mode
+
+`/nomistakes on` (firstmate's strictest safety posture) makes cheep incapable of changing
+your checkout without an explicit yes: every shared-workspace write and shell command asks
+first, and a validated subtask branch is merged **only after you approve its diff** in the
+approval overlay (`y`/`n`, scrollable preview). Declined or unattended work is never lost —
+it stays on its branch, and headless runs (`cheep run`, CI) hold everything on branches
+because there is no approver. `/nomistakes off` returns to your configured `/approval` mode
+and automatic merges.
+
+### Delivery: local merge or pull requests
+
+By default validated worktree changes merge into your local checkout. `/delivery pr` (or
+`"delivery": "pr"` in config.json) instead pushes each validated subtask branch and opens a
+**pull request** with the `gh` CLI — the local checkout is never modified, which makes cheep
+safe to point at shared repos.
+
+### Interrupted work is never lost
+
+Every delegated subtask writes a crash marker while it runs; if cheep dies mid-delegation,
+the next launch lists what was interrupted and where partial work survived (worktree
+branches are quarantined, never recycled, until their work provably lands). `/stow` is the
+graceful version: before a `/clear` or a walk-away it records durable lessons via
+`record_lesson` and appends a structured handoff note (done / in flight / next steps) to
+`~/.cheep/history/notes.md`.
+
+### Context bar, auto-compression, and saved memories
+
+The status bar shows a live **context gauge** (`ctx ▰▰▰▱▱▱▱▱ 38%`) — how full the
+orchestrator's conversation is relative to its compaction budget (`context_budget`,
+default 120k est. tokens; green → yellow at 60% → red at 85%). At 100% cheep
+**auto-compresses**: older history is summarized in place, recent turns stay verbatim, and
+the squeezed-out summary is appended to `~/.cheep/history/notes.md` — compression never
+silently discards memory. If a model's real window is smaller than the budget (common with
+local models) and the server rejects a request as too long, cheep compacts aggressively in
+bounded chunks and retries automatically instead of failing the run.
+
+### Reasoning effort per role
+
+Append `:low`, `:medium`, or `:high` to any model name (`"claude-sonnet-4-6:high"`,
+`"gpt-5:low"`) to set that role's thinking budget — extended thinking on Anthropic,
+`reasoning_effort` on OpenAI-compatible endpoints. An orchestrator at `:high` with executors
+at `:low` is the cost thesis expressed in one suffix. Ollama-style tags (`qwen3:8b`) are
+untouched.
+
+### Use it from your phone
+
+cheep in tmux + Tailscale SSH = the same live session from anywhere, surviving disconnects.
+See [docs/remote.md](docs/remote.md) for the 5-minute setup.
 
 ### Configure by chatting
 
@@ -211,6 +313,16 @@ scoped to specific roles with `roles` (`"orchestrator"`, `"executor"`; default b
 
 On launch you'll see `mcp "fs": N tool(s)`. A failed server is reported and skipped — cheep
 still runs.
+
+**Pi extensions** — cheep can run [pi coding agent](https://pi.dev) extensions published to
+npm (or local ones). `cheep pi add <npm-package>` installs the package into `~/.cheep/pi`
+and registers it; on the next start a bundled Node bridge loads the extension (TypeScript
+included, via jiti), honors its `pi.extensions` package manifest, and serves every tool it
+registers over MCP stdio — so pi tools join your agents' tool set like any MCP server's,
+named `pi__<tool>`. Only the **tool surface** crosses the bridge: pi event hooks, commands,
+custom renderers, and providers need pi's own runtime and are skipped (reported once on
+startup). Review third-party extensions before installing — they run with full system
+access. Requires `node` on PATH.
 
 **Skills** — drop markdown knowledge files in `~/.cheep/skills/*.md` (optional `name` /
 `description` front-matter). The planner calls `list_skills` to see them and `use_skill(name)`

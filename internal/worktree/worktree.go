@@ -26,6 +26,10 @@ type Tree struct {
 	Repo   string // the original repository working dir
 	Path   string // the isolated worktree directory
 	Branch string // the branch checked out in the worktree
+	Base   string // the commit the branch started from
+
+	pooled bool     // owned by a Pool: return via Release, not Remove
+	lock   *os.File // slot flock, held while acquired (pooled only)
 }
 
 // Add creates a worktree on a fresh branch off the repo's current HEAD.
@@ -46,7 +50,8 @@ func Add(repo, name string, uniq int) (*Tree, error) {
 		os.RemoveAll(path)
 		return nil, fmt.Errorf("worktree add: %w", err)
 	}
-	return &Tree{Repo: repo, Path: path, Branch: branch}, nil
+	head, _ := git(path, "rev-parse", "HEAD")
+	return &Tree{Repo: repo, Path: path, Branch: branch, Base: strings.TrimSpace(head)}, nil
 }
 
 func branchExists(repo, branch string) bool {
@@ -84,6 +89,40 @@ func (t *Tree) MergeInto() error {
 		return fmt.Errorf("merge conflict on %s", t.Branch)
 	}
 	return nil
+}
+
+// Discard throws away all uncommitted changes in the worktree (reset --hard +
+// clean -fd, deliberately without -x so cached build artifacts survive). Used
+// after scout tasks, whose file changes are incidental by contract.
+func (t *Tree) Discard() {
+	_, _ = git(t.Path, "reset", "--hard")
+	_, _ = git(t.Path, "clean", "-fd")
+}
+
+// Diff returns the unified diff of the branch against its base commit.
+func (t *Tree) Diff() string {
+	out, _ := git(t.Path, "diff", t.Base+"..HEAD")
+	return out
+}
+
+// PushAndPR pushes the worktree's branch to origin and opens a pull request
+// with the gh CLI. Returns the PR URL.
+func (t *Tree) PushAndPR(title, body string) (string, error) {
+	if _, err := git(t.Repo, "push", "-u", "origin", t.Branch); err != nil {
+		return "", fmt.Errorf("push: %w", err)
+	}
+	cmd := exec.Command("gh", "pr", "create", "--head", t.Branch, "--title", title, "--body", body)
+	cmd.Dir = t.Repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("gh pr create: %s", strings.TrimSpace(string(out)))
+	}
+	// gh prints the PR URL as the last line.
+	lines := strings.Fields(strings.TrimSpace(string(out)))
+	if len(lines) > 0 {
+		return lines[len(lines)-1], nil
+	}
+	return "", nil
 }
 
 // Remove deletes the worktree directory and its registration. If keepBranch is

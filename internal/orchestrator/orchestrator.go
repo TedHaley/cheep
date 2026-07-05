@@ -10,22 +10,70 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/TedHaley/cheep/internal/agent"
+	"github.com/TedHaley/cheep/internal/approve"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configtools"
 	"github.com/TedHaley/cheep/internal/core"
+	"github.com/TedHaley/cheep/internal/dispatch"
+	"github.com/TedHaley/cheep/internal/history"
+	"github.com/TedHaley/cheep/internal/inflight"
 	"github.com/TedHaley/cheep/internal/pricing"
+	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/skills"
 	"github.com/TedHaley/cheep/internal/tool"
+	"github.com/TedHaley/cheep/internal/validate"
 	"github.com/TedHaley/cheep/internal/worktree"
 )
+
+const reviewerSystem = `You are a fresh-context code reviewer. You did not write these changes
+and have no stake in them. Judge the unified diff below on correctness, safety, and fit with
+the project's stated conventions; use your read-only tools (read_file, list_dir) to check
+surrounding code when the diff alone is ambiguous. Do not request stylistic rewrites of
+working code. Be decisive.
+
+End your reply with EXACTLY ONE JSON object and nothing after it:
+{"verdict":"approve"} or
+{"verdict":"revise","summary":"<one line>","issues":[{"severity":"high|medium|low","file":"<path>","description":"<what and why>"}]}
+Only "revise" for issues that matter (bugs, broken behavior, unmet requirements, convention
+violations declared in the project instructions) — not preferences.`
+
+// NewReviewer builds the fresh-context review callback used by the validation
+// pipeline: a new session per call (no bias from the implementing agent),
+// read-only tools confined to the worktree, judging the branch diff. Exported
+// so `cheep validate --review` shares the exact same reviewer.
+func NewReviewer(cfg config.Config, onEvent core.EventFunc) func(ctx context.Context, diff, dir string) (validate.Verdict, error) {
+	ra := cfg.Orchestrator
+	if cfg.Reviewer != nil {
+		ra = *cfg.Reviewer
+	}
+	if !usable(ra) {
+		return nil
+	}
+	prov := provider.For(ra.Provider, ra.Endpoint, ra.APIKey, 4096)
+	maxTurns := ra.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = 15
+	}
+	return func(ctx context.Context, diff, dir string) (validate.Verdict, error) {
+		sess := agent.New("reviewer", prov, ra.Model, reviewerSystem+project.InstructionsBlock(dir),
+			tool.MakeReadOnly(dir), maxTurns, 0, onEvent).NewSession()
+		r := sess.SendCtx(ctx, "Review this diff:\n\n```diff\n"+diff+"\n```")
+		if r.Status != "completed" {
+			return validate.Verdict{}, fmt.Errorf("reviewer ended with status %s", r.Status)
+		}
+		return validate.ExtractVerdict(r.Output)
+	}
+}
 
 const executorSystem = `You are an executor agent: a focused, capable coding/execution worker.
 You receive one concrete subtask and complete it using your tools (read_file, write_file,
@@ -104,8 +152,11 @@ Be economical: plan and delegate rather than doing the work yourself.
 - DECOMPOSE the task into concrete, self-contained subtasks.
 - DELEGATE with the "delegate" tool. It takes a LIST of tasks and runs them in PARALLEL,
   so dispatch independent subtasks together in ONE call. Each task is
-  {"executor": "<name>", "subtask": "<full instructions>"}. Updating todos is NOT doing the
-  work — only delegate (then verify) actually does it.
+  {"executor": "<name>", "subtask": "<full instructions>", "kind": "ship"|"scout"}. Updating
+  todos is NOT doing the work — only delegate (then verify) actually does it.
+- SCOUT vs SHIP: mark investigation, audit, research, and planning subtasks "kind":"scout" —
+  a scout's file changes are discarded and its findings come back in "output" (also saved to
+  the "report" path). Use "ship" (the default) only when the subtask must change files.
 - ROUTE each subtask to the CHEAPEST executor that can do it well (they are listed
   cheapest-first with cost tiers). Reserve pricier executors for genuinely hard subtasks;
   a failed cheap attempt auto-escalates to a stronger one, so default to cheap. Mind the
@@ -151,11 +202,23 @@ type execRuntime struct {
 	maxResumes int
 	extra      []core.Tool
 	onEvent    core.EventFunc
+	projectFn  func() string // project instructions, re-read per session
+	gate       *approve.Gate
+	root       string // the user's real workdir (worktrees differ from it)
 }
 
 func (e execRuntime) newSession(workdir, label string) *agent.Session {
-	tools := append(tool.Make(workdir, true), e.extra...)
-	return agent.New(label, e.provider, e.model, executorSystem,
+	// Only work in the SHARED workspace is gated; isolated worktrees answer
+	// to the validation pipeline and the merge boundary instead.
+	shared := workdir == e.root
+	tools := append(e.gate.Wrap(tool.Make(workdir, true), shared, workdir), e.extra...)
+	system := executorSystem
+	if e.projectFn != nil {
+		// Read from the repo root (not the worktree copy) so uncommitted
+		// AGENTS.md edits and freshly recorded lessons reach new sessions.
+		system += e.projectFn()
+	}
+	return agent.New(label, e.provider, e.model, system,
 		tools, e.maxTurns, e.budget, e.onEvent).NewSession()
 }
 
@@ -304,6 +367,97 @@ func iterRes(status string, rounds int, exName, check, out, note string) string 
 	return string(b)
 }
 
+// writeReport persists a scout task's findings to ~/.cheep/reports and returns
+// the file path (firstmate's data/<id>/report.md, adapted).
+func writeReport(executor string, id int, subtask, output string) (string, error) {
+	home, err := config.Home()
+	if err != nil {
+		return "", err
+	}
+	d := filepath.Join(home, "reports")
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("%s-%s-%d.md", time.Now().UTC().Format("20060102-150405"), executor, id)
+	path := filepath.Join(d, name)
+	md := "# Scout report — " + executor + "\n\n" + time.Now().Local().Format("2006-01-02 15:04") +
+		"\n\n## Subtask\n\n" + strings.TrimSpace(subtask) + "\n\n## Findings\n\n" + strings.TrimSpace(output) + "\n"
+	return path, os.WriteFile(path, []byte(md), 0o600)
+}
+
+// batchNote renders one delegate batch as a run-notes entry.
+func batchNote(subtasks []string, results []map[string]any) string {
+	var b strings.Builder
+	for i, r := range results {
+		if r == nil {
+			continue
+		}
+		sub := ""
+		if i < len(subtasks) {
+			sub = clip(strings.ReplaceAll(strings.TrimSpace(subtasks[i]), "\n", " "), 140)
+		}
+		fmt.Fprintf(&b, "- **%v** (%v): %s\n", r["status"], r["executor"], sub)
+		if integ, ok := r["integration"].(string); ok && integ != "" {
+			fmt.Fprintf(&b, "  - integration: %s\n", integ)
+		}
+		if v, ok := r["validation"].(validate.Result); ok {
+			state := "failed"
+			if v.Passed {
+				state = "passed"
+			}
+			fmt.Fprintf(&b, "  - validation: %s (%d checks, %d fix rounds)\n", state, len(v.Checks), v.Rounds)
+			if v.Review != nil && v.Review.Summary != "" {
+				fmt.Fprintf(&b, "  - review: %s — %s\n", v.Review.Verdict, v.Review.Summary)
+			}
+		}
+		if esc, ok := r["escalation"].(string); ok && esc != "" {
+			fmt.Fprintf(&b, "  - escalation: %s\n", esc)
+		}
+		if rep, ok := r["report"].(string); ok && rep != "" {
+			fmt.Fprintf(&b, "  - report: %s\n", rep)
+		}
+		if pr, ok := r["pr"].(string); ok && pr != "" {
+			fmt.Fprintf(&b, "  - pr: %s\n", pr)
+		}
+	}
+	return b.String()
+}
+
+// slimValidation drops passing checks' outputs from a delegate result so the
+// orchestrator's context only carries the interesting parts.
+func slimValidation(v validate.Result) validate.Result {
+	for i := range v.Checks {
+		if v.Checks[i].Exit == 0 {
+			v.Checks[i].Output = ""
+		}
+	}
+	return v
+}
+
+// compactNote makes auto-compaction durable: the summary of the squeezed-out
+// context is appended to the run notes, so the "memory" survives compression.
+func compactNote(workdir string) func(string) {
+	return func(sum string) {
+		history.AppendRunNote(workdir, "**Auto-compacted context — memory saved**\n\n"+sum)
+	}
+}
+
+// lessonHint teaches the agent to persist corrections via record_lesson.
+const lessonHint = "\n\nLessons: when the user corrects you about how this project works (a " +
+	"convention, a command, a gotcha), call record_lesson with one concise sentence so the " +
+	"correction becomes durable project memory instead of a repeat mistake."
+
+// liaisonRules govern how results are reported to the user: outcomes in the
+// user's language, never internal machinery. Ported from firstmate §9.
+const liaisonRules = "\n\nReporting: you are the user's single point of contact — talk in OUTCOMES, " +
+	"not mechanics. Never surface internal vocabulary in your replies: executor names, escalation, " +
+	"worktrees, branches (unless work is stranded on one the user must act on), subtask ids, token " +
+	"budgets, or tool names. Translate: 'the tests now pass' beats 'the executor completed the " +
+	"subtask'. Always give full URLs (https://…), never bare #numbers or shorthand. Report failures " +
+	"plainly and first — what failed, why, the evidence, and your proposed next step — never buried " +
+	"under successes, never dressed up. Don't narrate routine progress; report when something is " +
+	"done, blocked, or needs a decision only the user can make."
+
 // skillHint nudges the planner to consult skills when any exist.
 func skillHint(skillTools []core.Tool) string {
 	if len(skillTools) == 0 {
@@ -311,6 +465,22 @@ func skillHint(skillTools []core.Tool) string {
 	}
 	return "\n\nSkills: project knowledge files are available — call list_skills to see them and " +
 		"use_skill(name) to load one before relevant work; fold what you learn into the subtasks you delegate."
+}
+
+// resolveExecutor picks the executor for a delegated task. With routing rules
+// active an explicit, known executor is required (the rules must not be
+// silently skipped); otherwise unknown/empty names fall back to def.
+func resolveExecutor(name string, known map[string]execRuntime, def string, rulesActive bool) (string, error) {
+	if _, ok := known[name]; ok {
+		return name, nil
+	}
+	if rulesActive {
+		if name == "" {
+			return "", fmt.Errorf(`routing rules are in force — set "executor" explicitly per the rules`)
+		}
+		return "", fmt.Errorf("unknown executor %q — pick one from the roster per the routing rules", name)
+	}
+	return def, nil
 }
 
 // escalateTarget returns the cheapest still-untried, usable executor strictly
@@ -341,10 +511,22 @@ func rescueAgent(cfg config.Config, onEvent core.EventFunc) *agent.Agent {
 	return nil
 }
 
-// Build returns the orchestrator agent. extraOrch/extraExec hold tools
-// discovered at runtime (e.g. MCP), added to the orchestrator and executors
-// respectively. In solo mode the agent gets both.
-func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch, extraExec []core.Tool, onEvent core.EventFunc) (*agent.Agent, error) {
+// Options configures Build. ExtraOrch/ExtraExec hold tools discovered at
+// runtime (e.g. MCP), added to the orchestrator and executors respectively; in
+// solo mode the agent gets both.
+type Options struct {
+	Isolate   bool
+	Mode      Mode
+	ExtraOrch []core.Tool
+	ExtraExec []core.Tool
+	OnEvent   core.EventFunc
+	Gate      *approve.Gate // nil = no approval gating
+}
+
+// Build returns the orchestrator agent wired per opt.
+func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error) {
+	isolate, mode := opt.Isolate, opt.Mode
+	extraOrch, extraExec, onEvent := opt.ExtraOrch, opt.ExtraExec, opt.OnEvent
 	// If the orchestrator can't run (no key / no model), fall back to a reachable
 	// executor so the user can fix the orchestrator config conversationally.
 	if !usable(cfg.Orchestrator) {
@@ -358,6 +540,10 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 	}
 	orchProv := provider.For(cfg.Orchestrator.Provider, cfg.Orchestrator.Endpoint, cfg.Orchestrator.APIKey, 4096)
 
+	// Standing instructions from AGENTS.md (global + project), injected into
+	// every role so all agents share the project's rules.
+	projBlock := project.Load(workdir).PromptBlock()
+
 	withBudget := func(a *agent.Agent) *agent.Agent {
 		a.CompactBudget = cfg.Orchestrator.ContextBudget
 		return a
@@ -366,31 +552,35 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 	// Chat: no tools. Plan: read-only investigation + extra (no edits/delegation).
 	switch mode {
 	case ModeChat:
-		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, chatSystem,
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, chatSystem+projBlock,
 			nil, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	case ModePlan:
+		skillTools := skills.Tools(workdir)
 		planTools := append(tool.MakeReadOnly(workdir), extraOrch...)
-		planTools = append(planTools, skills.Tools()...)
-		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem+skillHint(skills.Tools()),
+		planTools = append(planTools, skillTools...)
+		return withBudget(agent.New("cheep", orchProv, cfg.Orchestrator.Model, planSystem+skillHint(skillTools)+projBlock,
 			planTools, cfg.Orchestrator.MaxTurns, 0, onEvent)), nil
 	}
 
 	// ModeAuto, solo: no executors, the orchestrator does the work itself, so it
 	// gets both role's tools.
 	if len(cfg.Executors) == 0 {
-		skillTools := skills.Tools()
-		soloTools := append(tool.Make(workdir, true), extraOrch...)
+		skillTools := skills.Tools(workdir)
+		soloTools := append(opt.Gate.Wrap(tool.Make(workdir, true), true, workdir), extraOrch...)
 		soloTools = append(soloTools, extraExec...)
 		soloTools = append(soloTools, configtools.Tools()...)
 		soloTools = append(soloTools, skillTools...)
-		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools),
+		soloTools = append(soloTools, project.LessonTool(workdir))
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools)+lessonHint+liaisonRules+projBlock,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
+		solo.CompactNote = compactNote(workdir)
 		return solo, nil
 	}
 
 	runtimes := map[string]execRuntime{}
 	var order []string
+	projectFn := func() string { return project.InstructionsBlock(workdir) }
 	for _, e := range cfg.Executors {
 		runtimes[e.Name] = execRuntime{
 			name:       e.Name,
@@ -402,11 +592,49 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 			maxResumes: e.MaxResumes,
 			extra:      extraExec,
 			onEvent:    onEvent,
+			projectFn:  projectFn,
+			gate:       opt.Gate,
+			root:       workdir,
 		}
 		order = append(order, e.Name)
 	}
 	defaultExec := order[0]
 	isolated := isolate && worktree.IsRepo(workdir)
+
+	// Pooled worktrees keep gitignored build artifacts warm across subtasks.
+	// Nil pool (disabled, unsupported platform, or open failure) falls back to
+	// ephemeral per-subtask worktrees.
+	var pool *worktree.Pool
+	if isolated && !cfg.DisablePool {
+		if p, err := worktree.OpenPool(workdir); err == nil {
+			pool = p
+		}
+	}
+	// release returns a tree with its work either landed (merged / nothing to
+	// keep) or preserved (quarantined slot or kept branch).
+	release := func(t *worktree.Tree, landed bool) {
+		if pool != nil {
+			pool.Release(t, landed)
+			return
+		}
+		t.Remove(!landed)
+	}
+
+	// Pre-merge validation: project checks + fresh-context review, with
+	// bounded fix rounds, all inside the subtask's private worktree.
+	validationOn := !cfg.Validation.Disable
+	var reviewerFn func(context.Context, string, string) (validate.Verdict, error)
+	if validationOn && !cfg.Validation.SkipReview {
+		reviewerFn = NewReviewer(cfg, onEvent)
+	}
+
+	// Natural-language routing rules (the LLM matches; delegate() enforces
+	// only that a choice was made while rules exist).
+	home, _ := config.Home()
+	rules, rerr := dispatch.Load(workdir, home)
+	if rerr != nil {
+		onEvent(core.Event{Agent: "cheep", Type: "status", Status: "dispatch rules ignored: " + rerr.Error()})
+	}
 
 	// Cheap-first escalation: order executors by cost so a failed subtask can be
 	// retried on a more capable (pricier) executor before giving up.
@@ -514,23 +742,31 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 		Func: iterateUntil,
 	}
 
+	delivery := cfg.Delivery
+	noMistakes := cfg.NoMistakes
+
 	delegate := func(ctx context.Context, args map[string]any) string {
 		rawTasks, _ := args["tasks"].([]any)
 		if len(rawTasks) == 0 {
 			return `ERROR: "tasks" must be a non-empty array of {"executor","subtask"}`
 		}
 		type job struct {
-			executor, subtask string
+			executor, subtask, kind string
 		}
 		jobs := make([]job, len(rawTasks))
 		for i, rt := range rawTasks {
 			m, _ := rt.(map[string]any)
 			ex, _ := m["executor"].(string)
 			st, _ := m["subtask"].(string)
-			if _, ok := runtimes[ex]; !ok {
-				ex = defaultExec // unknown/empty name falls back to the first executor
+			kind, _ := m["kind"].(string)
+			if kind != "scout" {
+				kind = "" // ship is the default
 			}
-			jobs[i] = job{executor: ex, subtask: st}
+			resolved, err := resolveExecutor(ex, runtimes, defaultExec, rules.Active())
+			if err != nil {
+				return fmt.Sprintf("ERROR: task %d: %v", i+1, err)
+			}
+			jobs[i] = job{executor: resolved, subtask: st, kind: kind}
 		}
 
 		results := make([]map[string]any, len(jobs))
@@ -553,7 +789,15 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 				var tree *worktree.Tree
 				if isolated {
 					gitMu.Lock()
-					t, err := worktree.Add(workdir, start.name, id)
+					var t *worktree.Tree
+					var err error
+					if pool != nil {
+						if t, err = pool.Acquire(start.name, id, false); err != nil {
+							t, err = worktree.Add(workdir, start.name, id) // pool exhausted → ephemeral
+						}
+					} else {
+						t, err = worktree.Add(workdir, start.name, id)
+					}
 					gitMu.Unlock()
 					if err == nil {
 						tree, wd = t, t.Path
@@ -563,7 +807,23 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 					}
 				}
 
-				r, rt, trail := runJob(ctx, wd, j.subtask, j.executor, id)
+				// Crash marker: if this process dies mid-delegation, the next
+				// launch surfaces the interruption (the branch survives on its
+				// quarantined slot regardless).
+				mark := inflight.Job{Workdir: workdir, Executor: j.executor, Kind: j.kind,
+					Subtask: j.subtask, Started: time.Now()}
+				if tree != nil {
+					mark.Branch = tree.Branch
+				}
+				mark = inflight.Mark(mark)
+				defer mark.Clear()
+
+				subtask := j.subtask
+				if j.kind == "scout" {
+					subtask = "SCOUT task — investigate and report only. Any file changes you make " +
+						"will be DISCARDED, so put your COMPLETE findings in your final reply.\n\n" + subtask
+				}
+				r, rt, trail := runJob(ctx, wd, subtask, j.executor, id)
 				res := map[string]any{
 					"executor":      rt.name,
 					"model":         rt.model,
@@ -577,23 +837,99 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 					res["escalation"] = strings.Join(trail, " → ")
 				}
 
+				if j.kind == "scout" {
+					// Scouts deliver a report, not changes: discard whatever
+					// they touched and persist the findings as an artifact.
+					if path, err := writeReport(rt.name, id, j.subtask, r.Output); err == nil {
+						res["report"] = path
+					}
+					if tree != nil {
+						gitMu.Lock()
+						tree.Discard()
+						release(tree, true)
+						gitMu.Unlock()
+					}
+					results[i] = res
+					return
+				}
+
 				if tree != nil {
 					gitMu.Lock()
 					committed, cErr := tree.CommitAll("cheep: " + rt.name + " subtask")
+					gitMu.Unlock()
+
+					passed := true
+					if cErr == nil && committed && validationOn {
+						// Checks, review, and fix rounds run OUTSIDE gitMu:
+						// they only touch this subtask's private worktree, and
+						// long test runs must not serialize the other subtasks.
+						fix := func(fctx context.Context, dir, task string) error {
+							fr, _, _ := runJob(fctx, dir, task, j.executor, id)
+							if fr.Status != "completed" {
+								return fmt.Errorf("fix attempt ended with status %s", fr.Status)
+							}
+							gitMu.Lock()
+							_, err := tree.CommitAll("cheep: validation fix (" + rt.name + ")")
+							gitMu.Unlock()
+							return err
+						}
+						runner := validate.Runner{
+							Checks:    project.Load(workdir).Checks,
+							MaxRounds: cfg.Validation.MaxFixRounds,
+							Strict:    cfg.Validation.Strict,
+							Reviewer:  reviewerFn,
+							Fix:       fix,
+							OnEvent:   onEvent,
+						}
+						vres := runner.Run(ctx, tree.Path, tree.Base)
+						passed = vres.Passed
+						res["validation"] = slimValidation(vres)
+					}
+
+					// No-mistakes: the user signs off on the diff BEFORE anything
+					// merges. Asked outside gitMu so a pending approval never
+					// blocks the other subtasks' integration; fails closed when
+					// there is no approver (headless) or the run is cancelled.
+					mergeOK := true
+					if noMistakes && delivery != "pr" && cErr == nil && committed && passed {
+						d := opt.Gate.Ask(ctx, approve.Request{Agent: rt.name, Tool: "merge",
+							Path: tree.Branch, Diff: tree.Diff()})
+						mergeOK = d == approve.Allow || d == approve.AllowSession
+					}
+
+					gitMu.Lock()
 					switch {
 					case cErr != nil:
 						res["integration"] = "commit failed: " + cErr.Error()
-						tree.Remove(true)
+						release(tree, false)
 					case !committed:
 						res["integration"] = "no file changes"
-						tree.Remove(false)
+						release(tree, true)
+					case !passed:
+						res["integration"] = "failed validation (work kept on branch " + tree.Branch + ")"
+						release(tree, false)
+					case !mergeOK:
+						res["integration"] = "no-mistakes: not merged — awaiting/declined approval (work kept on branch " + tree.Branch + ")"
+						release(tree, false)
+					case delivery == "pr":
+						title := clip(strings.ReplaceAll(strings.TrimSpace(j.subtask), "\n", " "), 70)
+						body := "Delegated subtask:\n\n" + clip(j.subtask, 2000) +
+							"\n\n---\nOpened by cheep (executor: " + rt.name + ", validated pre-merge)."
+						if url, prErr := tree.PushAndPR("cheep: "+title, body); prErr != nil {
+							res["integration"] = "pr failed: " + prErr.Error() + " (work kept on branch " + tree.Branch + ")"
+							release(tree, false)
+						} else {
+							res["integration"] = "pull request opened"
+							res["pr"] = url
+							release(tree, true)
+						}
 					default:
 						if mErr := tree.MergeInto(); mErr != nil {
 							res["integration"] = mErr.Error() + " (kept on branch " + tree.Branch + ")"
-							tree.Remove(true)
+							release(tree, false)
 						} else {
 							res["integration"] = "merged"
-							tree.Remove(false)
+							release(tree, true)
 						}
 					}
 					gitMu.Unlock()
@@ -603,6 +939,11 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 			}(i, j)
 		}
 		wg.Wait()
+		subs := make([]string, len(jobs))
+		for i, j := range jobs {
+			subs[i] = j.subtask
+		}
+		history.AppendRunNote(workdir, batchNote(subs, results))
 		out, _ := json.MarshalIndent(results, "", "  ")
 		return string(out)
 	}
@@ -629,6 +970,13 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 								"type":        "string",
 								"description": "Complete, self-contained instructions for the executor.",
 							},
+							"kind": map[string]any{
+								"type": "string",
+								"enum": []string{"ship", "scout"},
+								"description": "\"ship\" (default) delivers file changes. \"scout\" is " +
+									"investigation/audit/planning only: its file changes are discarded and its " +
+									"findings are saved as a report — use it for research so no merge machinery runs.",
+							},
 						},
 						"required": []string{"subtask"},
 					},
@@ -645,15 +993,36 @@ func Build(cfg config.Config, workdir string, isolate bool, mode Mode, extraOrch
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +
 			"\"no file changes\", or a conflict left on a branch. If a merge conflicts, delegate a " +
 			"follow-up subtask (or resolve it yourself with git) before continuing."
+		if cfg.NoMistakes && cfg.Delivery != "pr" {
+			system += "\n\nNO-MISTAKES mode is ON: a validated subtask's branch merges ONLY after the " +
+				"user approves its diff. A result whose integration says \"no-mistakes: not merged\" " +
+				"is NOT a failure — the work is safe on the named branch awaiting the user's sign-off; " +
+				"report it that way and do not re-delegate it."
+		}
+		if delivery := cfg.Delivery; delivery == "pr" {
+			system += "\n\nDelivery is PR mode: validated ship subtasks are NOT merged locally — each " +
+				"branch is pushed and opened as a pull request (the result's \"pr\" field has the URL). " +
+				"Give the user the PR URLs; the local checkout is not modified."
+		}
+		if validationOn {
+			system += "\n\nValidation is ON: before any merge, the project's declared checks run in the " +
+				"subtask's worktree and a fresh-context reviewer judges the diff, with bounded automatic " +
+				"fix rounds. A result whose \"integration\" says \"failed validation\" kept its work on " +
+				"the named branch — read its \"validation\" field, decide whether the finding is real, " +
+				"and either delegate a targeted fix on that branch or report the finding to the user. " +
+				"Never re-delegate the whole subtask from scratch when a branch already holds the work."
+		}
 	}
-	skillTools := skills.Tools()
-	system += skillHint(skillTools)
-	tools := append(tool.Make(workdir, false), delegateTool, iterateTool)
+	skillTools := skills.Tools(workdir)
+	system += rules.PromptBlock() + skillHint(skillTools) + lessonHint + liaisonRules + projBlock
+	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
 	tools = append(tools, skillTools...)
+	tools = append(tools, project.LessonTool(workdir))
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
 		cfg.Orchestrator.MaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget
+	orch.CompactNote = compactNote(workdir)
 	return orch, nil
 }

@@ -16,9 +16,13 @@ import (
 	"github.com/TedHaley/cheep/internal/core"
 )
 
-// Record is one persisted conversation.
+// Record is one persisted conversation. Sessions form a tree: a record forked
+// from an earlier point of another carries that session's ID in Parent and the
+// message index the branch started from in ForkAt.
 type Record struct {
 	ID       string         `json:"id"`
+	Parent   string         `json:"parent,omitempty"`  // session this one was forked from
+	ForkAt   int            `json:"fork_at,omitempty"` // message index in the parent where the fork begins
 	Started  time.Time      `json:"started"`
 	Updated  time.Time      `json:"updated"`
 	Workdir  string         `json:"workdir"`
@@ -29,6 +33,7 @@ type Record struct {
 // Meta is the lightweight summary used to list sessions.
 type Meta struct {
 	ID      string
+	Parent  string
 	Started time.Time
 	Updated time.Time
 	Workdir string
@@ -47,6 +52,81 @@ func Dir() (string, error) {
 
 // NewID returns a sortable id from a timestamp (UTC, second precision).
 func NewID(t time.Time) string { return t.UTC().Format("20060102-150405") }
+
+// UniqueID returns a NewID that doesn't collide with a session already on disk
+// (forks can be created within the same second as their parent).
+func UniqueID(t time.Time) string {
+	d, err := Dir()
+	if err != nil {
+		return NewID(t)
+	}
+	for {
+		id := NewID(t)
+		if _, err := os.Stat(filepath.Join(d, id+".json")); os.IsNotExist(err) {
+			return id
+		}
+		t = t.Add(time.Second)
+	}
+}
+
+// Tree returns every session in depth-first tree order along with each row's
+// depth (0 = root). Roots keep List's newest-first order; children nest under
+// their parent. A parent that no longer exists makes its children roots.
+func Tree() ([]Meta, []int, error) {
+	metas, err := List()
+	if err != nil {
+		return nil, nil, err
+	}
+	byID := map[string]bool{}
+	for _, m := range metas {
+		byID[m.ID] = true
+	}
+	children := map[string][]Meta{}
+	var roots []Meta
+	for _, m := range metas {
+		if m.Parent != "" && byID[m.Parent] && m.Parent != m.ID {
+			children[m.Parent] = append(children[m.Parent], m)
+		} else {
+			roots = append(roots, m)
+		}
+	}
+	var outM []Meta
+	var outD []int
+	seen := map[string]bool{} // guards against parent cycles in corrupt data
+	var walk func(m Meta, d int)
+	walk = func(m Meta, d int) {
+		if seen[m.ID] {
+			return
+		}
+		seen[m.ID] = true
+		outM = append(outM, m)
+		outD = append(outD, d)
+		for _, c := range children[m.ID] {
+			walk(c, d+1)
+		}
+	}
+	for _, r := range roots {
+		walk(r, 0)
+	}
+	return outM, outD, nil
+}
+
+// AppendRunNote appends a timestamped markdown note to ~/.cheep/history/notes.md
+// — the "read in the morning" trail of what delegated batches did and how
+// validation went. Failures are silent: notes must never break a run.
+func AppendRunNote(workdir, md string) {
+	d, err := Dir()
+	if err != nil || os.MkdirAll(d, 0o700) != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(d, "notes.md"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	stamp := time.Now().Format("2006-01-02 15:04")
+	f.WriteString("\n## " + stamp + " — " + workdir + "\n\n" + strings.TrimSpace(md) + "\n")
+}
 
 // Save writes the JSON record and the Markdown transcript.
 func Save(r Record) error {
@@ -117,7 +197,7 @@ func List() ([]Meta, error) {
 			continue
 		}
 		out = append(out, Meta{
-			ID: r.ID, Started: r.Started, Updated: r.Updated,
+			ID: r.ID, Parent: r.Parent, Started: r.Started, Updated: r.Updated,
 			Workdir: r.Workdir, Title: r.Title, Turns: countTurns(r.Messages),
 		})
 	}
