@@ -675,6 +675,17 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 	defaultExec := order[0]
 	isolated := isolate && worktree.IsRepo(workdir)
+	// A freshly-init'd repo has no commit, so worktrees can't branch from HEAD.
+	// Establish one (including any existing files) rather than silently losing
+	// isolation to the shared workspace.
+	if isolated {
+		if created, err := worktree.EnsureCommit(workdir); err != nil {
+			onEvent(core.Event{Agent: "cheep", Type: "status", Status: "isolation off — couldn't initialize the repo: " + err.Error()})
+			isolated = false
+		} else if created {
+			onEvent(core.Event{Agent: "cheep", Type: "status", Status: "made an initial git commit so isolated worktrees work"})
+		}
+	}
 
 	// Pooled worktrees keep gitignored build artifacts warm across subtasks.
 	// Nil pool (disabled, unsupported platform, or open failure) falls back to

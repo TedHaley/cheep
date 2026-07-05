@@ -21,6 +21,30 @@ func IsRepo(dir string) bool {
 	return err == nil && strings.TrimSpace(out) == "true"
 }
 
+// hasHEAD reports whether the repo has at least one commit (a born HEAD).
+func hasHEAD(repo string) bool {
+	_, err := git(repo, "rev-parse", "--verify", "HEAD")
+	return err == nil
+}
+
+// EnsureCommit makes an initial commit when the repo has none yet, so git
+// worktrees — which branch from HEAD — can be created. A freshly `git init`'d
+// repo has an unborn HEAD, and `worktree add … HEAD` fails with "invalid
+// reference: HEAD". Existing files are included so worktrees get repo content;
+// --allow-empty covers a repo with nothing to commit. Returns whether it
+// created the commit. No-op once HEAD exists.
+func EnsureCommit(repo string) (bool, error) {
+	if hasHEAD(repo) {
+		return false, nil
+	}
+	_, _ = git(repo, "add", "-A") // best effort; --allow-empty backs it up
+	if _, err := git(repo, "-c", "user.name=cheep", "-c", "user.email=cheep@localhost",
+		"commit", "--allow-empty", "-m", "cheep: initial commit"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Tree is one isolated worktree on its own branch.
 type Tree struct {
 	Repo   string // the original repository working dir
