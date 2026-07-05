@@ -135,3 +135,23 @@ func TestContextExhausted(t *testing.T) {
 		t.Fatalf("status = %q, want context_exhausted", r.Status)
 	}
 }
+
+// TestUnlimitedTurns: MaxTurns<=0 (loop mode) must run until the model stops,
+// not cap out and not spin forever on a normal completion.
+func TestUnlimitedTurns(t *testing.T) {
+	tools := []core.Tool{{Name: "step", Func: func(context.Context, map[string]any) string { return "ok" }}}
+	// three tool-call turns (varied args so loop detection doesn't trip), then text
+	p := &scriptProvider{turns: []core.Turn{
+		toolCallTurn("step", map[string]any{"n": 1.0}),
+		toolCallTurn("step", map[string]any{"n": 2.0}),
+		toolCallTurn("step", map[string]any{"n": 3.0}),
+		{Message: core.Message{Role: "assistant", Text: "done"}},
+	}}
+	r := New("t", p, "m", "sys", tools, 0 /* unlimited */, 0, nil).Run("go")
+	if r.Status != "completed" || r.Output != "done" {
+		t.Fatalf("unlimited-turns run = %q/%q, want completed/done", r.Status, r.Output)
+	}
+	if r.Turns != 4 {
+		t.Errorf("turns = %d, want 4", r.Turns)
+	}
+}

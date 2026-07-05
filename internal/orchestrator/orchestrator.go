@@ -206,8 +206,11 @@ Be economical: plan and delegate rather than doing the work yourself.
   all the detail it needs to be done in isolation.
 - DELEGATE all execution to executors — especially web access, research, API calls, and
   data gathering. NEVER fetch web pages, scrape, or call external services yourself (no
-  curl/wget/web requests in run_bash); hand that to an executor. Do not write or edit files
-  yourself either.
+  curl/wget/web requests in run_bash); hand that to an executor.
+- NEVER WRITE FILES YOURSELF. Do not use run_bash to create or edit files (no "cat > file",
+  no here-docs, no tee, no sed -i, no echo >). Writing files by hand burns your limited turns
+  one file at a time and wastes premium tokens on work a cheap executor should do. Batch the
+  files into delegate subtasks instead — one executor can write many files in a single call.
 - READ THE RESULTS: each delegate result has an "output" field containing the executor's
   findings — that IS the deliverable; use it directly. Executors run in isolation and share
   NO files with you, so never look for files they "wrote" and never tell them to save to
@@ -657,6 +660,13 @@ type Options struct {
 func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error) {
 	isolate, mode := opt.Isolate, opt.Mode
 	extraOrch, extraExec, onEvent := opt.ExtraOrch, opt.ExtraExec, opt.OnEvent
+	// Loop mode iterates toward a goal until met or plateaued, so the
+	// orchestrator runs with NO turn cap (0 = unlimited); it's bounded by the
+	// budget, loop detection, and esc instead.
+	orchMaxTurns := cfg.Orchestrator.MaxTurns
+	if mode == ModeLoop {
+		orchMaxTurns = 0
+	}
 	// If the orchestrator can't run (no key / no model), fall back to a reachable
 	// executor so the user can fix the orchestrator config conversationally.
 	if !usable(cfg.Orchestrator) {
@@ -707,7 +717,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			soloSys += loopSystem
 		}
 		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSys+skillHint(skillTools)+lessonHint+liaisonRules+suggestHint(cfg)+projBlock,
-			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
+			soloTools, orchMaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		solo.CompactNote = compactNote(workdir)
 		return solo, nil
@@ -1286,7 +1296,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	tools = append(tools, skillTools...)
 	tools = append(tools, project.LessonTool(workdir))
 	orch := agent.New("orchestrator", orchProv, cfg.Orchestrator.Model, system, tools,
-		cfg.Orchestrator.MaxTurns, 0, onEvent)
+		orchMaxTurns, 0, onEvent)
 	orch.CompactBudget = cfg.Orchestrator.ContextBudget
 	orch.CompactNote = compactNote(workdir)
 	return orch, nil

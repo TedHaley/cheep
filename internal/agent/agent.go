@@ -104,7 +104,9 @@ func (s *Session) SendCtx(ctx context.Context, userText string) RunResult {
 	overflowRetried := false // one compact-and-retry per Send when the window overflows
 	var recent []string      // tool-call signatures, for stuck detection
 
-	for turn := 1; turn <= a.MaxTurns; turn++ {
+	// MaxTurns <= 0 means unlimited (loop mode) — bounded instead by loop
+	// detection, the budget cap, context compaction, and user cancellation.
+	for turn := 1; a.MaxTurns <= 0 || turn <= a.MaxTurns; turn++ {
 		if st := ctxStatus(ctx); st != "" {
 			return s.result(st, inTok, outTok, turn-1)
 		}
