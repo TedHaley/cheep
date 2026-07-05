@@ -206,8 +206,9 @@ Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵�
 ### Full-screen agent tabs (default) — or inline
 
 cheep runs as a full-screen shell with a **tab per agent**: the orchestrator plus one for
-each executor it spawns, with live status glyphs (`●` `✓` `⚠` `✗`). **Tab**/`Ctrl+←/→`
-switch agents, the wheel or `PgUp/PgDn` scrolls, `/keeptabs` and `Ctrl+W`//`/close` manage
+each executor it spawns, with live status glyphs (`●` `✓` `⚠` `✗`). **Tab** (or **Option+Tab**;
+**Option+Shift+Tab** for previous) switches agents, the wheel or `PgUp/PgDn` scrolls,
+`/keeptabs` and `Ctrl+W`//`/close` manage
 tabs, and a persistent status line shows the mode, context gauge, and **token counter**
 (orchestrator vs executor usage, local tokens flagged free). Copying text: `/copy` grabs the
 last reply, `/mouse` releases the wheel so drag-select works (sticky; cheep disables the

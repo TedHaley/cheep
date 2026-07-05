@@ -991,22 +991,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = orchestrator.NextMode(m.mode)
 			(&m).rebuild(true)
 			return m, nil
-		case "tab":
+		case "tab", "alt+tab", "ctrl+right":
+			// Next agent. alt+tab (Option+Tab) is the mac-friendly binding;
+			// ctrl+right kept for other platforms (it collides with macOS
+			// Mission Control, so Option+Tab is preferred there).
 			if len(m.tabs) > 0 {
 				m.active = (m.active + 1) % len(m.tabs)
 				m.follow = true
 				(&m).syncViewport()
 			}
 			return m, nil
-		case "ctrl+left":
+		case "alt+shift+tab", "ctrl+left":
+			// Previous agent.
 			if len(m.tabs) > 0 {
 				m.active = (m.active - 1 + len(m.tabs)) % len(m.tabs)
-				(&m).syncViewport()
-			}
-			return m, nil
-		case "ctrl+right":
-			if len(m.tabs) > 0 {
-				m.active = (m.active + 1) % len(m.tabs)
+				m.follow = true
 				(&m).syncViewport()
 			}
 			return m, nil
