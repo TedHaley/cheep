@@ -161,6 +161,8 @@ type model struct {
 
 	jobsList   []jobs.Job // /scheduled overlay rows
 	jobsCursor int
+
+	suggestions []string // next-step chips parsed from the last reply (1–N to use)
 }
 
 var (
@@ -184,6 +186,42 @@ func userLine(text string, w int) string {
 		w = 80
 	}
 	return userSt.Render(wordwrap.String("› "+text, w-2))
+}
+
+// splitSuggestions pulls a trailing "[[NEXT]] a | b | c" line (emitted by the
+// orchestrator) off the reply, returning the cleaned text and up to 3 chips.
+func splitSuggestions(text string) (string, []string) {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		t := strings.TrimSpace(lines[i])
+		if t == "" {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(t, "[[NEXT]]"); ok {
+			var sug []string
+			for _, s := range strings.Split(rest, "|") {
+				if s = strings.TrimSpace(s); s != "" {
+					sug = append(sug, s)
+				}
+			}
+			if len(sug) > 3 {
+				sug = sug[:3]
+			}
+			clean := strings.TrimRight(strings.Join(append(lines[:i], lines[i+1:]...), "\n"), "\n")
+			return clean, sug
+		}
+		break // sentinel is only honored as the last non-empty line
+	}
+	return text, nil
+}
+
+// suggestionLines renders the next-step chips shown above the input.
+func (m model) suggestionLines() []string {
+	out := []string{hintSt.Render("next ") + hintSt.Render("· press 1–"+strconv.Itoa(len(m.suggestions))+" to use")}
+	for i, s := range m.suggestions {
+		out = append(out, todoProgSt.Render("  "+strconv.Itoa(i+1)+" ")+short(s, max(20, m.w-8)))
+	}
+	return out
 }
 
 // renderMarkdown renders assistant text as styled markdown, bulleted on line 1.
@@ -986,6 +1024,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				(&m).relayout()
 				return m, nil
 			}
+		case "1", "2", "3":
+			// Accept a next-step suggestion into the input (Tab stays for
+			// autocomplete). Only when the line is empty, so digits type normally.
+			if m.input.Value() == "" && len(m.suggestions) > 0 {
+				if n := int(msg.String()[0] - '1'); n < len(m.suggestions) {
+					m.input.SetValue(m.suggestions[n])
+					m.input.CursorEnd()
+					m.suggestions = nil
+					(&m).syncInputHeight()
+					return m, nil
+				}
+			}
 		case "pgup":
 			m.follow = false
 			m.vp, _ = m.vp.Update(msg)
@@ -1133,6 +1183,7 @@ func (m model) startTask(text string) (tea.Model, tea.Cmd) {
 
 // runMessage sends text to the orchestrator, showing `display` in the log.
 func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
+	m.suggestions = nil // last turn's suggestions are stale once we act
 	(&m).appendLine(0, display)
 	m.tabs[0].status = "run"
 	m.active = 0
@@ -1258,6 +1309,16 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m.openFork()
 	case "/tree":
 		return m.openTree()
+	case "/suggest", "/suggestions":
+		m.cfg.SuggestOff = !m.cfg.SuggestOff
+		_ = config.Save(m.cfg)
+		(&m).rebuild(true)
+		if m.cfg.SuggestOff {
+			m.suggestions = nil
+			m.footer = "next-step suggestions OFF"
+		} else {
+			m.footer = "next-step suggestions ON — press 1–3 after a reply to use one"
+		}
 	case "/scheduled", "/schedule":
 		return m.openScheduled()
 	case "/cd":
@@ -1605,11 +1666,16 @@ func (m *model) applyEvent(e core.Event) {
 			m.appendLine(idx, hintSt.Render(line))
 		}
 	case "text":
-		if strings.TrimSpace(e.Text) != "" {
-
+		txt := e.Text
+		if idx == 0 { // pull "next step" suggestions off the orchestrator's reply
+			if clean, sug := splitSuggestions(txt); len(sug) > 0 {
+				txt, m.suggestions = clean, sug
+			}
+		}
+		if strings.TrimSpace(txt) != "" {
 			// Add a visual separator between user input and assistant response
 			m.appendLine(idx, sepSt.Render(strings.Repeat("─", max(1, m.w-2))))
-			for _, l := range renderMarkdown(e.Text, m.w) {
+			for _, l := range renderMarkdown(txt, m.w) {
 				m.appendLine(idx, l)
 			}
 		}
@@ -1720,6 +1786,9 @@ func (m model) View() string {
 				parts = append(parts, strings.Join(ql, "\n"))
 			}
 		}
+		if !m.running && len(m.suggestions) > 0 {
+			parts = append(parts, strings.Join(m.suggestionLines(), "\n"))
+		}
 		if comp := m.viewCompletions(); comp != "" {
 			parts = append(parts, comp)
 		}
@@ -1738,6 +1807,9 @@ func (m model) View() string {
 		if len(queueLines) > 0 {
 			parts = append(parts, strings.Join(queueLines, "\n"))
 		}
+	}
+	if !m.running && len(m.suggestions) > 0 {
+		parts = append(parts, strings.Join(m.suggestionLines(), "\n"))
 	}
 	if comp := m.viewCompletions(); comp != "" {
 		parts = append(parts, comp)

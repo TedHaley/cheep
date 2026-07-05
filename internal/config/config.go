@@ -134,6 +134,11 @@ type Config struct {
 	// project entry overrides BudgetUSD; otherwise BudgetUSD applies everywhere.
 	Budgets map[string]float64 `json:"budgets,omitempty"`
 
+	// SuggestOff disables the inline "next steps" suggestions the orchestrator
+	// emits at the end of a turn (shown as selectable chips). On by default;
+	// the suggestions ride the same response, so they cost nothing extra.
+	SuggestOff bool `json:"suggest_off,omitempty"`
+
 	// EndpointConcurrency caps concurrent in-flight requests per endpoint URL
 	// (0/absent = default: local endpoints serialize at 1, cloud is unlimited).
 	// Raise a beefy local server, or throttle a rate-limited cloud one.

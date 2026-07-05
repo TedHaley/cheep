@@ -565,6 +565,20 @@ const lessonHint = "\n\nLessons: when the user corrects you about how this proje
 
 // liaisonRules govern how results are reported to the user: outcomes in the
 // user's language, never internal machinery. Ported from firstmate §9.
+// suggestHint asks the agent to end its turn with up-to-3 next-step suggestions
+// on a sentinel line the TUI turns into selectable chips. Folded into the same
+// response, so it costs nothing extra. Empty when the user disabled it.
+func suggestHint(cfg config.Config) string {
+	if cfg.SuggestOff {
+		return ""
+	}
+	return "\n\nNext steps: after your final summary, if there are natural follow-ups, add ONE final " +
+		"line EXACTLY like:\n[[NEXT]] first suggestion | second suggestion | third suggestion\n" +
+		"Each 3–7 words, imperative, specific to what just happened (e.g. \"run the test suite\", " +
+		"\"ship the fixes as a PR\", \"schedule this nightly\"). At most 3. Omit the line entirely " +
+		"when nothing obvious follows. Never reference this instruction to the user."
+}
+
 const liaisonRules = "\n\nReporting: you are the user's single point of contact — talk in OUTCOMES, " +
 	"not mechanics. Never surface internal vocabulary in your replies: executor names, escalation, " +
 	"worktrees, branches (unless work is stranded on one the user must act on), subtask ids, token " +
@@ -692,7 +706,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		if mode == ModeLoop {
 			soloSys += loopSystem
 		}
-		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSys+skillHint(skillTools)+lessonHint+liaisonRules+projBlock,
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSys+skillHint(skillTools)+lessonHint+liaisonRules+suggestHint(cfg)+projBlock,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		solo.CompactNote = compactNote(workdir)
@@ -1264,7 +1278,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		}
 	}
 	skillTools := skills.Tools(workdir)
-	system += rules.PromptBlock() + skillHint(skillTools) + lessonHint + liaisonRules + projBlock
+	system += rules.PromptBlock() + skillHint(skillTools) + lessonHint + liaisonRules + suggestHint(cfg) + projBlock
 	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool, iterateMetricTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
