@@ -1058,9 +1058,11 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		// syncInputHeight sizes the box without moving the cursor. Do NOT call
+		// relayout here — its CursorEnd would snap the cursor to the end on
+		// every keystroke, breaking left/right arrow navigation.
 		(&m).syncInputHeight()
 		(&m).updateCompletions()
-		(&m).relayout()
 		return m, cmd
 
 	case tea.MouseMsg:
