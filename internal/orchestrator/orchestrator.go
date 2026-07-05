@@ -660,13 +660,10 @@ type Options struct {
 func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error) {
 	isolate, mode := opt.Isolate, opt.Mode
 	extraOrch, extraExec, onEvent := opt.ExtraOrch, opt.ExtraExec, opt.OnEvent
-	// Loop mode iterates toward a goal until met or plateaued, so the
-	// orchestrator runs with NO turn cap (0 = unlimited); it's bounded by the
-	// budget, loop detection, and esc instead.
+	// Orchestrator turns are uncapped by default (cfg default is 0 = unlimited);
+	// bounded by loop detection, the budget cap, compaction, and esc. A user who
+	// sets max_turns in config still gets that cap.
 	orchMaxTurns := cfg.Orchestrator.MaxTurns
-	if mode == ModeLoop {
-		orchMaxTurns = 0
-	}
 	// If the orchestrator can't run (no key / no model), fall back to a reachable
 	// executor so the user can fix the orchestrator config conversationally.
 	if !usable(cfg.Orchestrator) {

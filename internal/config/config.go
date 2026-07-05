@@ -385,9 +385,10 @@ func (c *Config) ApplyDefaults() {
 	if o.Model == "" && o.Provider == "anthropic" {
 		o.Model = "claude-sonnet-4-6"
 	}
-	if o.MaxTurns == 0 {
-		o.MaxTurns = 30
-	}
+	// Orchestrator turns default to UNLIMITED (0). A per-run turn cap just cut
+	// long autonomous work short; runs are bounded by loop detection, the
+	// budget cap, context compaction, and esc instead. Set max_turns in config
+	// to reimpose a cap. (Executors keep their own cap + resume-with-summary.)
 	if o.ContextWindow == 0 {
 		if w, ok := lookupWindow(o.Model); ok {
 			o.ContextWindow = w
