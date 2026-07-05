@@ -818,13 +818,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.footer = "verifying new orchestrator " + fresh.Orchestrator.Model + " …"
 			return m, verifyConfigCmd(fresh)
 		}
-		// Backstop: orchestrator stopped with unfinished todos and never delegated.
+		// Backstop: the orchestrator stopped with unfinished todos. Nudge it to
+		// keep going — whether or not it delegated this turn (it may have done
+		// one phase and quit with more pending). Bounded per user message so a
+		// model that keeps stopping short can't run away.
 		if m.mode == orchestrator.ModeAuto && len(m.cfg.Executors) > 0 &&
-			msg.r.Status == "completed" && m.openTodos > 0 && !m.delegated && m.nudges < 2 {
+			msg.r.Status == "completed" && m.openTodos > 0 && m.nudges < 3 {
 			m.nudges++
-			nudge := "You stopped, but there are unfinished todos and you did not call the " +
-				"delegate tool. Use delegate now to run the open items in parallel across the " +
-				"executors, then verify the results. Act — do not just describe."
+			nudge := "There are still unfinished todos. Keep going: delegate the next open " +
+				"item(s) to your executors and verify the results. Don't stop until every todo " +
+				"is done or you hit a real blocker you must tell me about — act, don't just describe."
 			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: finishing open todos"))
 		}
 		if len(m.queue) > 0 { // run the next queued message
