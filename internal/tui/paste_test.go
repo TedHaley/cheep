@@ -88,3 +88,25 @@ func TestUnbracketedPasteBurst(t *testing.T) {
 		t.Fatalf("deliberate enter should submit and clear the input, got %q", m.input.Value())
 	}
 }
+
+// TestLongLineWrapGrowsInput: a single long line must grow the box by its
+// wrapped rows — a 1-row box makes the textarea chase the cursor sideways.
+func TestLongLineWrapGrowsInput(t *testing.T) {
+	t.Setenv("CHEEP_HOME", t.TempDir())
+	cfg := config.Config{
+		Orchestrator: config.Agent{Provider: "openai", Endpoint: "http://127.0.0.1:1", Model: "m"},
+		Executors:    []config.Agent{{Name: "e1", Provider: "openai", Endpoint: "http://127.0.0.1:1", Model: "m"}},
+	}
+	cfg.ApplyDefaults()
+	m := newModel(cfg, t.TempDir(), make(chan core.Event, 8), nil, nil, false)
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	m = nm.(model)
+
+	long := strings.Repeat("wrap this text ", 20) // ~300 chars vs ~78-wide box
+	nm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(long)})
+	m = nm.(model)
+
+	if h := m.input.Height(); h < 3 {
+		t.Fatalf("input height = %d for a %d-char line in an 80-wide window; want >= 3 wrapped rows", h, len(long))
+	}
+}

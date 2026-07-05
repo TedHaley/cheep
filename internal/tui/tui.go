@@ -620,10 +620,21 @@ func (m *model) relayout() {
 }
 
 // syncInputHeight grows and shrinks the input box with its content (1–6
-// rows, soft-wrapped lines included) and re-derives the viewport height.
-// Called on every input change so earlier lines never scroll out of view.
+// rows) and re-derives the viewport height. Called on every input change so
+// earlier lines never scroll out of view. Rows are counted VISUALLY: a long
+// line soft-wraps, and with a too-short box the textarea's inner viewport
+// chases the cursor sideways — which reads as "scrolling right, not
+// wrapping".
 func (m *model) syncInputHeight() {
-	lines := m.input.LineCount()
+	w := m.input.Width()
+	lines := 0
+	for _, l := range strings.Split(m.input.Value(), "\n") {
+		if w > 0 {
+			lines += lipgloss.Width(l)/w + 1 // wrapped rows, incl. the cursor's
+		} else {
+			lines++
+		}
+	}
 	if lines < 1 {
 		lines = 1
 	}
