@@ -1901,8 +1901,22 @@ func verifyConfigCmd(cfg config.Config) tea.Cmd {
 }
 
 func configEqual(a, b config.Config) bool {
-	x, _ := json.Marshal(a)
-	y, _ := json.Marshal(b)
+	// Ignore runtime-resolved fields: context windows are detected in memory
+	// at startup (not written to disk), so a fresh config.Load() would always
+	// differ from the live m.cfg and falsely read as "the agent rewired cheep"
+	// — which reprinted the banner mid-session and dropped window detection.
+	strip := func(c config.Config) config.Config {
+		c.Orchestrator.ContextWindow, c.Orchestrator.ContextBudget, c.Orchestrator.TokenBudget = 0, 0, 0
+		ex := make([]config.Agent, len(c.Executors))
+		copy(ex, c.Executors)
+		for i := range ex {
+			ex[i].ContextWindow, ex[i].ContextBudget, ex[i].TokenBudget = 0, 0, 0
+		}
+		c.Executors = ex
+		return c
+	}
+	x, _ := json.Marshal(strip(a))
+	y, _ := json.Marshal(strip(b))
 	return string(x) == string(y)
 }
 
