@@ -104,7 +104,7 @@ type model struct {
 	openTodos    int  // non-done todos from the orchestrator's latest update_todos
 	delegated    bool // did the orchestrator call delegate this run?
 	stowing      bool // current run is a /stow; capture its reply as a run note
-	mouseOff     bool // mouse tracking released so the terminal can select/copy text
+	mouseOn      bool // mouse capture opt-in: wheel scrolls tabs, selection needs Option/Shift
 	nudges       int  // auto-continue count since the last user message
 	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
 	budgetWarned bool // already warned at 80% of the budget cap this session
@@ -292,11 +292,11 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events, extraOrch, extraExec, firstRun)
-	// Mouse on for wheel/trackpad scrolling — unless the user turned it off
-	// (/mouse) so terminal-native text selection works. With it on, hold
-	// Option (macOS) or Shift to select text without toggling.
+	// Selection-first by default: no mouse capture, so terminal-native
+	// select/copy just works. /mouse opts into capture (wheel scrolls the
+	// focused tab); even then Option/Shift-drag still selects.
 	opts := []tea.ProgramOption{tea.WithAltScreen()}
-	if !cfg.MouseOff {
+	if cfg.Mouse {
 		opts = append(opts, tea.WithMouseCellMotion())
 	}
 	p := tea.NewProgram(m, opts...)
@@ -343,7 +343,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		extraOrch:  extraOrch,
 		extraExec:  extraExec,
 		keepTabs:   cfg.KeepTabs,
-		mouseOff:   cfg.MouseOff,
+		mouseOn:    cfg.Mouse,
 		follow:     true,
 		onEvent: func(e core.Event) {
 			select {
@@ -1064,15 +1064,15 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 			(&m).closeTab(m.active)
 		}
 	case "/mouse":
-		m.mouseOff = !m.mouseOff
-		m.cfg.MouseOff = m.mouseOff
+		m.mouseOn = !m.mouseOn
+		m.cfg.Mouse = m.mouseOn
 		_ = config.Save(m.cfg) // sticky across sessions
-		if m.mouseOff {
-			m.footer = "mouse OFF (saved) — select/copy text normally; scroll with pgup/pgdn · /mouse to re-enable"
-			return m, tea.DisableMouse
+		if m.mouseOn {
+			m.footer = "mouse capture ON (saved) — wheel scrolls tabs; hold Option/Shift to select text"
+			return m, tea.EnableMouseCellMotion
 		}
-		m.footer = "mouse ON (saved) — wheel scrolls tabs (hold Option/Shift to select text)"
-		return m, tea.EnableMouseCellMotion
+		m.footer = "mouse capture OFF (saved) — select/copy text normally; scroll with pgup/pgdn"
+		return m, tea.DisableMouse
 	case "/copy":
 		if m.session == nil {
 			m.footer = "nothing to copy yet"

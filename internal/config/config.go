@@ -46,9 +46,10 @@ type Config struct {
 	MCP          map[string]mcp.Server `json:"mcp,omitempty"` // name -> MCP server
 	KeepTabs     bool                  `json:"keep_tabs,omitempty"`
 
-	// MouseOff starts the shell without mouse capture, so terminal-native
-	// text selection/copy works; scroll with PgUp/PgDn. Toggle live with /mouse.
-	MouseOff bool `json:"mouse_off,omitempty"`
+	// Mouse opts into mouse capture (wheel/trackpad scrolls the focused tab).
+	// Default off: terminal-native text selection/copy just works; scroll with
+	// PgUp/PgDn. Toggle live with /mouse.
+	Mouse bool `json:"mouse,omitempty"`
 
 	// DisableEscalate turns off cheap-first escalation (retrying a failed subtask
 	// on a more capable executor). Escalation is on by default.
