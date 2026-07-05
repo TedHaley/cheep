@@ -47,9 +47,13 @@ type Config struct {
 	KeepTabs     bool                  `json:"keep_tabs,omitempty"`
 
 	// Mouse opts into mouse capture (wheel/trackpad scrolls the focused tab).
-	// Default off: terminal-native text selection/copy just works; scroll with
-	// PgUp/PgDn. Toggle live with /mouse.
+	// Only meaningful with Tabs; inline mode always leaves the mouse native.
 	Mouse bool `json:"mouse,omitempty"`
+
+	// Tabs opts into the full-screen tab-per-agent UI (the pre-inline
+	// behavior). Default off: cheep renders inline, chat lives in the
+	// terminal's own scrollback, and native scrolling/selection just work.
+	Tabs bool `json:"tabs,omitempty"`
 
 	// DisableEscalate turns off cheap-first escalation (retrying a failed subtask
 	// on a more capable executor). Escalation is on by default.

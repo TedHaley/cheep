@@ -88,12 +88,15 @@ func (m model) doFork(msgIdx int) (tea.Model, tea.Cmd) {
 	}
 	m.session = orch.Resume(msgs)
 
-	lines := welcomeLines(m.cfg, m.connectivity)
-	lines = append(lines, hintSt.Render("⑂ forked from "+parent+" — type an alternative to the turn you replaced"), "")
+	replay := []string{hintSt.Render("⑂ forked from " + parent + " — type an alternative to the turn you replaced"), ""}
 	for _, msg := range msgs {
-		lines = append(lines, replayLines(msg, m.w)...)
+		replay = append(replay, replayLines(msg, m.w)...)
 	}
-	m.tabs[0].lines = lines
+	if m.inline {
+		m.pendingOut = append(m.pendingOut, replay...)
+	} else {
+		m.tabs[0].lines = append(welcomeLines(m.cfg, m.connectivity), replay...)
+	}
 	m.overlay = ""
 	m.active, m.follow = 0, true
 	m.footer = "forked · new branch " + m.histID
@@ -118,8 +121,7 @@ func (m model) viewFork() string {
 		lines = append(lines, cur+short(strings.ReplaceAll(txt, "\n", " "), 60))
 	}
 	lines = append(lines, "", hintSt.Render("↑/↓ move · enter fork · esc close"))
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
 
 // openTree shows the whole session tree (including the current session).
@@ -193,6 +195,5 @@ func (m model) viewTree() string {
 		lines = append(lines, cur+indent+branch+short(t, 48)+hintSt.Render("  "+meta)+marker)
 	}
 	lines = append(lines, "", hintSt.Render("↑/↓ move · enter switch · esc close"))
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }

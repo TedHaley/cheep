@@ -323,6 +323,8 @@ func lineREPL(cfg config.Config, workdir string, extraOrch, extraExec []core.Too
 				setMode(orchestrator.ModePlan)
 			case "/auto":
 				setMode(orchestrator.ModeAuto)
+			case "/loop":
+				setMode(orchestrator.ModeLoop)
 			case "/mode":
 				setMode(orchestrator.NextMode(mode))
 			case "/setup":

@@ -161,7 +161,8 @@ func (m model) viewHelp() string {
 	lines := []string{
 		b.Render("cheep — help"),
 		"",
-		"modes:   shift+tab cycles chat → plan → auto  (or /chat /plan /auto)",
+		"modes:   shift+tab cycles chat → plan → auto → loop  (or /chat /plan /auto /loop)",
+		"         loop = agree on a measurable goal, then iterate until met or plateaued.",
 		"         multi-agent delegation happens only in AUTO mode;",
 		"         chat = talk only, plan = read-only investigation.",
 		"glyphs:  ● running · ✓ done · ⚠ stopped early · ✗ error",
@@ -191,6 +192,5 @@ func (m model) viewHelp() string {
 		"",
 		hintSt.Render("press any key to close"),
 	}
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 3).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 3).Render(strings.Join(lines, "\n")))
 }

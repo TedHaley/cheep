@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,14 +102,16 @@ type model struct {
 	histIdx   int      // cursor into inputHist (== len means "current draft")
 	histDraft string   // the in-progress line saved when you start browsing history
 
-	openTodos    int  // non-done todos from the orchestrator's latest update_todos
-	delegated    bool // did the orchestrator call delegate this run?
-	stowing      bool // current run is a /stow; capture its reply as a run note
-	mouseOn      bool // mouse capture opt-in: wheel scrolls tabs, selection needs Option/Shift
-	nudges       int  // auto-continue count since the last user message
-	keepTabs     bool // keep finished executor tabs (else auto-close at turn end)
-	budgetWarned bool // already warned at 80% of the budget cap this session
-	quitArmed    bool // first ctrl+c pressed while a task was running
+	openTodos    int      // non-done todos from the orchestrator's latest update_todos
+	delegated    bool     // did the orchestrator call delegate this run?
+	stowing      bool     // current run is a /stow; capture its reply as a run note
+	mouseOn      bool     // mouse capture opt-in: wheel scrolls tabs, selection needs Option/Shift
+	inline       bool     // render inline (chat in terminal scrollback) instead of the alt-screen tab UI
+	pendingOut   []string // inline: lines queued for tea.Println into the scrollback
+	nudges       int      // auto-continue count since the last user message
+	keepTabs     bool     // keep finished executor tabs (else auto-close at turn end)
+	budgetWarned bool     // already warned at 80% of the budget cap this session
+	quitArmed    bool     // first ctrl+c pressed while a task was running
 
 	pendingCfg config.Config // last config we tried to switch to (avoid re-verifying)
 
@@ -292,12 +295,17 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	Version = version
 	events := make(chan core.Event, 1024)
 	m := newModel(cfg, workdir, events, extraOrch, extraExec, firstRun)
-	// Selection-first by default: no mouse capture, so terminal-native
-	// select/copy just works. /mouse opts into capture (wheel scrolls the
-	// focused tab); even then Option/Shift-drag still selects.
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
-	if cfg.Mouse {
-		opts = append(opts, tea.WithMouseCellMotion())
+	// Inline by default (like Claude Code): the conversation prints into the
+	// terminal's own scrollback, so native scrolling and text selection just
+	// work and nothing translates wheel events into stray key presses. The
+	// full-screen tab-per-agent UI is the "tabs": true opt-in, where /mouse
+	// additionally opts into wheel capture.
+	var opts []tea.ProgramOption
+	if cfg.Tabs {
+		opts = append(opts, tea.WithAltScreen())
+		if cfg.Mouse {
+			opts = append(opts, tea.WithMouseCellMotion())
+		}
 	}
 	p := tea.NewProgram(m, opts...)
 	go func() {
@@ -344,6 +352,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 		extraExec:  extraExec,
 		keepTabs:   cfg.KeepTabs,
 		mouseOn:    cfg.Mouse,
+		inline:     !cfg.Tabs,
 		follow:     true,
 		onEvent: func(e core.Event) {
 			select {
@@ -490,6 +499,11 @@ func (m *model) rebuild(keep bool) {
 
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg)}
+	if m.inline {
+		for _, l := range m.tabs[0].lines { // banner + welcome, once
+			cmds = append(cmds, tea.Println(l))
+		}
+	}
 	if m.overlay == "setupwiz" { // first launch / unusable orchestrator — scan now
 		cmds = append(cmds, wizDiscoverCmd())
 	}
@@ -611,6 +625,21 @@ func (m *model) relayout() {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nm, cmd := m.update(msg)
+	mm, ok := nm.(model)
+	if !ok || !mm.inline || len(mm.pendingOut) == 0 {
+		return nm, cmd
+	}
+	prints := make([]tea.Cmd, len(mm.pendingOut))
+	for i, l := range mm.pendingOut {
+		l := l
+		prints[i] = tea.Println(l)
+	}
+	mm.pendingOut = nil
+	return mm, tea.Batch(tea.Sequence(prints...), cmd)
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
@@ -721,6 +750,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case probeMsg:
 		m.connectivity = map[string]string(msg)
+		if m.inline {
+			var parts []string
+			for label, st := range m.connectivity {
+				mark := okSt.Render("✓")
+				if st != "ok" {
+					mark = errSt.Render("✗")
+				}
+				parts = append(parts, mark+" "+label+hintSt.Render(" ("+st+")"))
+			}
+			sort.Strings(parts)
+			if len(parts) > 0 {
+				m.pendingOut = append(m.pendingOut, hintSt.Render("agents: ")+strings.Join(parts, hintSt.Render("  ·  ")))
+			}
+			return m, nil
+		}
 		if len(m.tabs) > 0 && len(m.tabs[0].lines) == m.welcomeLen { // banner untouched
 			m.tabs[0].lines = welcomeLines(m.cfg, m.connectivity)
 			m.welcomeLen = len(m.tabs[0].lines)
@@ -1054,6 +1098,10 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	case "/auto":
 		m.mode = orchestrator.ModeAuto
 		(&m).rebuild(true)
+	case "/loop":
+		m.mode = orchestrator.ModeLoop
+		(&m).rebuild(true)
+		m.footer = "loop mode — give me a measurable goal (metric command + direction + target) and I'll iterate until it's met or progress plateaus"
 	case "/mode":
 		m.mode = orchestrator.NextMode(m.mode)
 		(&m).rebuild(true)
@@ -1064,6 +1112,10 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 			(&m).closeTab(m.active)
 		}
 	case "/mouse":
+		if m.inline {
+			m.footer = "inline mode: native scrolling & selection are always on — /mouse only applies to the tab UI (\"tabs\": true in config)"
+			return m, nil
+		}
 		m.mouseOn = !m.mouseOn
 		m.cfg.Mouse = m.mouseOn
 		_ = config.Save(m.cfg) // sticky across sessions
@@ -1115,6 +1167,9 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.histTitle = ""
 		m.histParent, m.histForkAt = "", 0
 		m.ctxTokens = 0
+		if m.inline {
+			m.pendingOut = append(m.pendingOut, "", hintSt.Render("── cleared · fresh session "+m.histID+" ──"), "")
+		}
 		m.footer = "(cleared)"
 		(&m).syncViewport()
 	case "/history", "/resume":
@@ -1305,6 +1360,12 @@ func (m *model) tabFor(name string) int {
 }
 
 func (m *model) appendLine(idx int, line string) {
+	if m.inline {
+		if idx != 0 { // executor output is prefixed instead of tabbed
+			line = hintSt.Render("⟨"+m.tabs[idx].title+"⟩ ") + line
+		}
+		m.pendingOut = append(m.pendingOut, line)
+	}
 	m.tabs[idx].lines = append(m.tabs[idx].lines, line)
 }
 
@@ -1536,6 +1597,24 @@ func (m model) View() string {
 		hint = left + strings.Repeat(" ", gap) + tok
 	}
 	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
+	if m.inline {
+		// Inline chrome only: the conversation itself lives in the terminal
+		// scrollback (via tea.Println), like Claude Code.
+		parts := []string{}
+		if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
+			parts = append(parts, strings.Join(todos, "\n"))
+		}
+		if m.running && len(m.queue) > 0 {
+			if ql := queueHeaderLines(m.queue); len(ql) > 0 {
+				parts = append(parts, strings.Join(ql, "\n"))
+			}
+		}
+		if comp := m.viewCompletions(); comp != "" {
+			parts = append(parts, comp)
+		}
+		parts = append(parts, rule, m.input.View(), hint)
+		return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	}
 	// Banner stays at the top of the scrolling log; the todo checklist is a sticky
 	// panel just above the input.
 	parts := []string{m.tabBar(), m.vp.View()}
@@ -1586,6 +1665,8 @@ func modeLabel(mode orchestrator.Mode) string {
 		sym, color = "⏵", "244" // grey
 	case orchestrator.ModePlan:
 		sym, color = "⏸", "37" // greenish-blue
+	case orchestrator.ModeLoop:
+		sym, color = "∞", "213" // loop: magenta
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(sym + " " + string(mode))
 }
@@ -1752,6 +1833,15 @@ func (m model) ctxBar() string {
 	}
 	return hintSt.Render("ctx ") + st.Render(strings.Repeat("▰", filled)) +
 		hintSt.Render(strings.Repeat("▱", cells-filled)) + hintSt.Render(fmt.Sprintf(" %d%%", int(ratio*100)))
+}
+
+// place centers an overlay box in the alt-screen UI; inline mode just returns
+// the box (a full-height Place would stomp the scrollback area).
+func (m model) place(box string) string {
+	if m.inline {
+		return box
+	}
+	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, box)
 }
 
 // tokenSummary is the compact persistent counter (e.g. "Σ orch 13k · exec 81k · $0.07").

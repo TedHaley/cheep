@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -114,28 +116,54 @@ const (
 	ModeChat Mode = "chat" // conversation only, no tools
 	ModePlan Mode = "plan" // read-only investigation, produces a plan
 	ModeAuto Mode = "auto" // full autonomy (delegate / edit), today's behavior
+	ModeLoop Mode = "loop" // auto + plan: agree on measurable goals, then loop until met or plateaued
 )
 
 // ParseMode returns the mode for a name, or false if unknown.
 func ParseMode(s string) (Mode, bool) {
 	switch Mode(s) {
-	case ModeChat, ModePlan, ModeAuto:
+	case ModeChat, ModePlan, ModeAuto, ModeLoop:
 		return Mode(s), true
 	}
 	return "", false
 }
 
-// NextMode cycles chat → plan → auto → chat.
+// NextMode cycles chat → plan → auto → loop → chat.
 func NextMode(m Mode) Mode {
 	switch m {
 	case ModeChat:
 		return ModePlan
 	case ModePlan:
 		return ModeAuto
+	case ModeAuto:
+		return ModeLoop
 	default:
 		return ModeChat
 	}
 }
+
+// loopSystem layers the LOOP-mode protocol on top of the normal auto prompt:
+// agree on measurable goals first, then iterate toward them, stopping only on
+// goal-reached or plateau.
+const loopSystem = `
+
+LOOP MODE is ON — you optimize toward MEASURABLE goals, not one-shot tasks.
+Protocol, in order:
+1. GOALS FIRST. Before any work: if the user's request lacks a measurable goal, ask for one
+   (at most one short round of questions). A goal needs (a) a METRIC — a shell command whose
+   output yields a number (test pass count, coverage %, lint warnings, p95 latency, bundle
+   bytes, benchmark ns/op) — (b) a DIRECTION (up/down), and (c) a TARGET (or "as far as you
+   can"). Propose concrete goals yourself when the user is vague; confirm, then start.
+2. BASELINE. Measure before changing anything and report the starting number.
+3. LOOP. Prefer the iterate_metric tool — it runs improve→measure rounds on a cheap executor
+   and stops itself on target-reached or plateau. For pass/fail goals use iterate_until. Only
+   loop by hand (delegate → measure → repeat) when a round needs judgment between iterations,
+   and then re-measure EVERY round.
+4. STOP conditions — the ONLY reasons to stop: the target is met, progress has plateaued
+   (two consecutive rounds without improvement), or the budget/user stops you. Do not stop
+   just because one round "seems good"; the metric decides, not vibes.
+5. REPORT the trajectory (baseline → each round → final), what moved the number most, and —
+   if plateaued short of target — the bottleneck you hit and what would unblock it.`
 
 const orchestratorSystemTmpl = `You are the orchestrator. You coordinate a fleet of cheaper
 executor agents to accomplish the user's task. You are expensive; the executors are cheap.
@@ -340,6 +368,17 @@ func clip(s string, n int) string {
 	}
 	return s
 }
+
+// parseMetric extracts the LAST number in a measure command's output.
+func parseMetric(out string) (float64, error) {
+	ms := metricRe.FindAllString(out, -1)
+	if len(ms) == 0 {
+		return 0, fmt.Errorf("no number in output")
+	}
+	return strconv.ParseFloat(strings.TrimSuffix(ms[len(ms)-1], "%"), 64)
+}
+
+var metricRe = regexp.MustCompile(`-?\d+(?:\.\d+)?%?`)
 
 // runCheck runs a shell predicate in dir and returns its combined output + exit code.
 func runCheck(ctx context.Context, dir, cmd string) (string, int) {
@@ -571,7 +610,11 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		soloTools = append(soloTools, configtools.Tools()...)
 		soloTools = append(soloTools, skillTools...)
 		soloTools = append(soloTools, project.LessonTool(workdir))
-		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSystem+skillHint(skillTools)+lessonHint+liaisonRules+projBlock,
+		soloSys := soloSystem
+		if mode == ModeLoop {
+			soloSys += loopSystem
+		}
+		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSys+skillHint(skillTools)+lessonHint+liaisonRules+projBlock,
 			soloTools, cfg.Orchestrator.MaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
 		solo.CompactNote = compactNote(workdir)
@@ -722,6 +765,120 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 				"Fix the underlying cause so the check passes.", subtask, round, check, code, clip(out, 4000))
 		}
 		return iterRes("failed", maxRounds, ex, check, lastOut, "check still failing after max_rounds")
+	}
+
+	iterateMetric := func(ctx context.Context, args map[string]any) string {
+		subtask, measure := strArg(args, "subtask"), strArg(args, "measure")
+		if subtask == "" || measure == "" {
+			return `ERROR: "subtask" and "measure" are required`
+		}
+		ex := strArg(args, "executor")
+		if _, ok := runtimes[ex]; !ok {
+			ex = cheapest
+		}
+		down := strArg(args, "direction") == "down"
+		target, hasTarget := args["target"].(float64)
+		maxRounds := intArg(args, "max_rounds", 8)
+		plateau := intArg(args, "plateau", 2)
+
+		read := func() (float64, string) {
+			out, _ := runCheck(ctx, workdir, measure)
+			v, err := parseMetric(out)
+			if err != nil {
+				return 0, out
+			}
+			return v, ""
+		}
+		baseline, badOut := read()
+		if badOut != "" {
+			return `ERROR: measure command produced no number. Output: ` + clip(badOut, 800)
+		}
+		better := func(a, b float64) bool { // is a better than b?
+			if down {
+				return a < b
+			}
+			return a > b
+		}
+		met := func(v float64) bool {
+			if !hasTarget {
+				return false
+			}
+			if down {
+				return v <= target
+			}
+			return v >= target
+		}
+
+		best := baseline
+		trajectory := []float64{baseline}
+		noImp := 0
+		status, rounds := "max_rounds", 0
+		if met(baseline) {
+			status, rounds = "goal_already_met", 0
+		} else {
+			for round := 1; round <= maxRounds; round++ {
+				if ctx.Err() != nil {
+					status, rounds = "aborted", round-1
+					break
+				}
+				task := fmt.Sprintf("%s\n\nGoal: move the metric `%s` %s (current best %.4g, latest %.4g%s). "+
+					"Make the most impactful improvement you can this round.",
+					subtask, measure, map[bool]string{true: "DOWN", false: "UP"}[down],
+					best, trajectory[len(trajectory)-1],
+					map[bool]string{true: fmt.Sprintf(", target %.4g", target), false: ""}[hasTarget])
+				_, rt, _ := runJob(ctx, workdir, task, ex, round)
+				v, bad := read()
+				if bad != "" {
+					status, rounds = "measure_failed", round
+					break
+				}
+				trajectory = append(trajectory, v)
+				rounds = round
+				onEvent(core.Event{Agent: "cheep", Type: "status",
+					Status: fmt.Sprintf("loop round %d/%d on %s — %s = %.4g (best %.4g)", round, maxRounds, rt.name, measure, v, best)})
+				if better(v, best) {
+					best, noImp = v, 0
+				} else {
+					noImp++
+				}
+				if met(v) {
+					status = "goal_reached"
+					break
+				}
+				if noImp >= plateau {
+					status = "plateaued"
+					break
+				}
+			}
+		}
+		res := map[string]any{
+			"status": status, "rounds": rounds, "baseline": baseline, "best": best,
+			"trajectory": trajectory, "measure": measure,
+		}
+		b, _ := json.MarshalIndent(res, "", "  ")
+		return string(b)
+	}
+
+	iterateMetricTool := core.Tool{
+		Name: "iterate_metric",
+		Description: "Optimize toward a NUMERIC goal: run improve→measure rounds on a cheap executor until " +
+			"the target is reached or progress plateaus (no improvement for `plateau` consecutive rounds). " +
+			"`measure` is a shell command whose output ends with the metric number. Use for coverage, " +
+			"benchmark, size, and count goals; use iterate_until for plain pass/fail checks.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"subtask":    map[string]any{"type": "string", "description": "What to improve each round (self-contained)."},
+				"measure":    map[string]any{"type": "string", "description": "Shell command printing the metric; the LAST number in its output is used."},
+				"direction":  map[string]any{"type": "string", "enum": []string{"up", "down"}, "description": "Which way is better (default up)."},
+				"target":     map[string]any{"type": "number", "description": "Stop when the metric reaches this (optional — else run to plateau)."},
+				"executor":   map[string]any{"type": "string", "description": "Executor to run on (default: the cheapest)."},
+				"max_rounds": map[string]any{"type": "integer", "description": "Max improvement rounds (default 8)."},
+				"plateau":    map[string]any{"type": "integer", "description": "Stop after this many rounds without improvement (default 2)."},
+			},
+			"required": []string{"subtask", "measure"},
+		},
+		Func: iterateMetric,
 	}
 
 	iterateTool := core.Tool{
@@ -988,6 +1145,9 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 
 	system := fmt.Sprintf(orchestratorSystemTmpl, roster(cfg.Executors, cfg.Budget(workdir)))
+	if mode == ModeLoop {
+		system += loopSystem
+	}
 	if isolated {
 		system += "\n\nIsolation is ON: each delegated subtask runs in its own git worktree and is " +
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +
@@ -1015,7 +1175,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 	skillTools := skills.Tools(workdir)
 	system += rules.PromptBlock() + skillHint(skillTools) + lessonHint + liaisonRules + projBlock
-	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool)
+	tools := append(opt.Gate.Wrap(tool.Make(workdir, false), true, workdir), delegateTool, iterateTool, iterateMetricTool)
 	tools = append(tools, extraOrch...)
 	tools = append(tools, configtools.Tools()...)
 	tools = append(tools, skillTools...)

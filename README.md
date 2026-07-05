@@ -192,19 +192,28 @@ The interactive shell has three modes, switchable mid-conversation (your history
 - **chat** — talk only, no tools, no changes.
 - **plan** — read-only investigation; produces a step-by-step plan for you to approve.
 - **auto** — full autonomy: plan, delegate to executors, edit, and verify (the default).
+- **loop** — auto with a goal: agree on a **measurable target** first (a shell command whose
+  output is a number — coverage %, benchmark time, lint count — plus a direction and target),
+  then iterate until it's met or progress **plateaus** (two rounds without improvement). The
+  metric decides when to stop, not vibes. Powered by the `iterate_metric` tool: improve →
+  measure rounds on a cheap executor, trajectory reported back.
 
 Press **Shift+Tab** to cycle modes live (the prompt shows the current one: `⏵⏵ auto`,
-`⏸ plan`, `⏵ chat`). Or use `/chat` `/plan` `/auto` / `/mode`.
+`⏸ plan`, `⏵ chat`, `∞ loop`). Or use `/chat` `/plan` `/auto` `/loop` / `/mode`.
 
-### Agent tabs
+### Inline by default; agent tabs opt-in
 
-In a terminal, cheep runs as a full-screen shell with a **tab per agent**: the orchestrator
-plus one for each executor it spawns (with a live status — running `●`, done `✓`, stuck `⚠`,
-error `✗`). Press **Tab** (or `Ctrl+←/→`) to switch agents and watch each one's output;
-`PgUp/PgDn` (or the mouse wheel) scrolls. Finished executor tabs **auto-close at the end of a
-turn** by default — toggle with `/keeptabs`, or close the focused one with `Ctrl+W` / `/close`.
-A persistent **token counter** shows orchestrator vs executor usage and flags local tokens as
-free. When stdin isn't a terminal (pipes/CI), cheep falls back to a simple line-based mode.
+By default cheep renders **inline** (like Claude Code): the conversation prints into your
+terminal's own scrollback, so native scrolling, native text selection/copy, and search all
+just work — no mouse capture, no alt screen, executor output interleaved with a dim
+`⟨name#1⟩` prefix. A persistent status line shows the mode, context gauge, and **token
+counter** (orchestrator vs executor usage, local tokens flagged free).
+
+Prefer the full-screen **tab-per-agent** UI? Set `"tabs": true` in config.json: one tab per
+executor with live status glyphs (`●` `✓` `⚠` `✗`), **Tab**/`Ctrl+←/→` to switch,
+`PgUp/PgDn` to scroll, `/keeptabs` and `Ctrl+W`//`/close` to manage tabs, and `/mouse` to
+opt into wheel-scroll capture. When stdin isn't a terminal (pipes/CI), cheep falls back to a
+simple line-based mode.
 
 ### Chat history & the session tree
 

@@ -94,3 +94,23 @@ func TestResolveExecutor(t *testing.T) {
 		t.Fatal("unknown executor must be rejected under rules")
 	}
 }
+
+func TestParseMetric(t *testing.T) {
+	cases := []struct {
+		out  string
+		want float64
+		err  bool
+	}{
+		{"coverage: 73.4% of statements", 73.4, false},
+		{"ok  \tpkg\t0.5s\ncoverage: 81.0%", 81.0, false},
+		{"warnings: 14", 14, false},
+		{"BenchmarkX-10  1200 ns/op\n-3.5", -3.5, false},
+		{"no numbers here", 0, true},
+	}
+	for _, c := range cases {
+		got, err := parseMetric(c.out)
+		if (err != nil) != c.err || got != c.want {
+			t.Errorf("parseMetric(%q) = %v,%v want %v,err=%v", c.out, got, err, c.want, c.err)
+		}
+	}
+}

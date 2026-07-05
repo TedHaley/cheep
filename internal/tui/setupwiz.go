@@ -459,7 +459,7 @@ func (m model) viewWiz() string {
 	w := m.wiz
 	if w.loading {
 		body := title + "\n\n  scanning for local servers and API keys…"
-		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, ovBox.Padding(1, 3).Render(body))
+		return m.place(ovBox.Padding(1, 3).Render(body))
 	}
 	lines := []string{title, hintSt.Render("Pick an orchestrator; optionally tag executors to delegate to."), ""}
 	if len(w.cands) == 0 {
@@ -526,8 +526,7 @@ func (m model) viewWiz() string {
 
 	lines = append(lines, "",
 		hintSt.Render("↑/↓ move · o orchestrator · e executor · enter save · m manual · esc cancel"))
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
 
 func (m model) viewWizKey(title string) string {
@@ -542,8 +541,7 @@ func (m model) viewWizKey(title string) string {
 	}
 	lines = append(lines, "",
 		hintSt.Render("enter save · esc back · stored in ~/.cheep/keys.env (0600), active immediately"))
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
 
 func (m model) viewWizManual(title string) string { // provider list
@@ -570,8 +568,7 @@ func (m model) viewWizManual(title string) string { // provider list
 	}
 	lines = append(lines, "",
 		hintSt.Render("↑/↓ move · enter choose · esc back to discovered list"))
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
 
 func (m model) viewWizManualFields(title string) string {
@@ -594,6 +591,5 @@ func (m model) viewWizManualFields(title string) string {
 	}
 	lines = append(lines, "",
 		hintSt.Render("tab / ↑↓ move · enter save · esc back to providers"))
-	return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
-		ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
+	return m.place(ovBox.Padding(1, 2).Render(strings.Join(lines, "\n")))
 }
