@@ -603,7 +603,15 @@ func bashCmd(cmdStr string) tea.Cmd {
 
 // relayout sizes the input to its content (1–6 lines) and gives the rest to the log.
 func (m *model) relayout() {
-	lines := strings.Count(m.input.Value(), "\n") + 1
+	m.syncInputHeight()
+	m.input.CursorEnd()
+}
+
+// syncInputHeight grows and shrinks the input box with its content (1–6
+// rows, soft-wrapped lines included) and re-derives the viewport height.
+// Called on every input change so earlier lines never scroll out of view.
+func (m *model) syncInputHeight() {
+	lines := m.input.LineCount()
 	if lines < 1 {
 		lines = 1
 	}
@@ -611,7 +619,6 @@ func (m *model) relayout() {
 		lines = 6
 	}
 	m.input.SetHeight(lines)
-	m.input.CursorEnd()
 	header := 0
 	if len(m.tabs) > 0 {
 		// Account for todos
@@ -936,6 +943,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		(&m).syncInputHeight()
 		(&m).updateCompletions()
 		(&m).relayout()
 		return m, cmd
@@ -952,6 +960,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	(&m).syncInputHeight()
 	return m, cmd
 }
 
