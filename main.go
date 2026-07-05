@@ -144,6 +144,7 @@ func ensureConfig() config.Config {
 	if err != nil {
 		fatal(fmt.Errorf("reading config: %w", err))
 	}
+	c.ResolveWindows(provider.ContextWindow)
 	return c
 }
 
@@ -242,6 +243,7 @@ func cmdChat() {
 			if err != nil {
 				fatal(fmt.Errorf("reading config: %w", err))
 			}
+			c.ResolveWindows(provider.ContextWindow)
 			cfg = c
 		}
 		mt, mcpSess := startMCP(cfg)

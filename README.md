@@ -282,10 +282,12 @@ the target repo.)
 
 ### Per-model context windows
 
-For cloud models, cheep reads the context window straight from the LiteLLM dataset it
-already caches for pricing (`~/.cheep/prices.json`) — no configuration needed. For local
-models (which rarely appear there, since the window is a load-time choice) set
-`"context_window"` explicitly. Either way, cheep sizes everything to fit: it self-compacts
+cheep resolves each model's window automatically: **cloud** models come from the LiteLLM
+dataset it already caches for pricing (`~/.cheep/prices.json`), and **local** models are
+probed at startup — cheep asks the server (LM Studio's `/api/v0/models`, llama.cpp's
+`/props`) for the context length it actually loaded, i.e. the max available for that model.
+Set `"context_window"` explicitly only to override the detected value (e.g. to cap a
+huge window). Either way, cheep sizes everything to fit: it self-compacts
 at ~75% of the window and hard-stops just under it, so a small local model **compresses and
 continues** mid-task instead of dying with `context_exhausted`. Each
 compaction is saved to `~/.cheep/history/notes.md`, and the orchestrator sees each

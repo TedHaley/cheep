@@ -28,6 +28,50 @@ func lookupWindow(model string) (int, bool) {
 	return WindowLookup(model)
 }
 
+// deriveExecutorBudgets sizes an executor's self-compaction and hard-stop to
+// its context window: compact at ~75%% (compress and continue), stop at ~95%%
+// (just under the window). No-op when the window is unknown.
+func deriveExecutorBudgets(e *Agent) {
+	if e.ContextWindow <= 0 {
+		return
+	}
+	if e.ContextBudget == 0 {
+		e.ContextBudget = e.ContextWindow * 3 / 4
+	}
+	if e.TokenBudget == 0 || e.TokenBudget == 100000 { // 0 or the legacy default
+		e.TokenBudget = e.ContextWindow * 95 / 100
+	}
+}
+
+// ResolveWindows fills any still-unknown context window (local models absent
+// from the dataset) by probing the server for the length it actually loaded —
+// the "max available" for that model — then re-derives budgets. probe takes
+// (endpoint, apiKey, model); a zero result leaves the agent's defaults. Anthropic
+// roles and agents with an explicit context_window are skipped. Runs at startup
+// (it makes network calls), separate from the offline ApplyDefaults.
+func (c *Config) ResolveWindows(probe func(endpoint, apiKey, model string) (int, bool)) {
+	fill := func(a *Agent, isOrch bool) {
+		if a.ContextWindow > 0 || a.Provider == "anthropic" || a.Endpoint == "" {
+			return
+		}
+		w, ok := probe(a.Endpoint, a.APIKey, a.Model)
+		if !ok || w <= 0 {
+			return
+		}
+		a.ContextWindow = w
+		if isOrch {
+			a.ContextBudget = w * 3 / 4 // override the offline 120k fallback
+		} else {
+			a.ContextBudget = 0 // let derive recompute from the real window
+			deriveExecutorBudgets(a)
+		}
+	}
+	fill(&c.Orchestrator, true)
+	for i := range c.Executors {
+		fill(&c.Executors[i], false)
+	}
+}
+
 // Agent describes one model endpoint (orchestrator or executor).
 type Agent struct {
 	Name        string `json:"name,omitempty"`     // executors only
@@ -362,16 +406,7 @@ func (c *Config) ApplyDefaults() {
 				e.ContextWindow = w
 			}
 		}
-		// Self-compact well before the window so a chunk gets summarized and
-		// continued instead of dying; keep the hard stop just under the window.
-		if e.ContextWindow > 0 {
-			if e.ContextBudget == 0 {
-				e.ContextBudget = e.ContextWindow * 3 / 4
-			}
-			if e.TokenBudget == 0 {
-				e.TokenBudget = e.ContextWindow * 95 / 100
-			}
-		}
+		deriveExecutorBudgets(e)
 		if e.TokenBudget == 0 {
 			e.TokenBudget = 100000
 		}
