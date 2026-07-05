@@ -17,11 +17,10 @@ Website & docs: **https://tedhaley.ca/cheep/**
 
 ## Install
 
-**Homebrew (macOS)**
+**Homebrew (macOS & Linux)**
 
 ```sh
-brew tap TedHaley/homebrew-tap
-brew install cheep
+brew install TedHaley/homebrew-tap/cheep
 ```
 
 **Go**

@@ -1,6 +1,6 @@
 # GoReleaser config — https://goreleaser.com
 # Builds static binaries for every platform, publishes them to a GitHub Release,
-# and updates the Homebrew tap so `brew install cheep` works.
+# and updates the Homebrew tap so `brew install TedHaley/homebrew-tap/cheep` works.
 version: 2
 
 project_name: cheep
@@ -15,18 +15,24 @@ builds:
     binary: cheep
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-      - windows
-    goarch:
-      - amd64
-      - arm64
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
     ldflags:
       - -s -w -X main.version={{ .Version }}
+  # The optional bridge that lets cheep use a logged-in Claude Pro/Max plan.
+  - id: cheep-claude-mcp
+    main: ./cmd/cheep-claude-mcp
+    binary: cheep-claude-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
 
 archives:
   - id: cheep
+    builds: [cheep, cheep-claude-mcp]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
@@ -50,25 +56,23 @@ changelog:
       - "^chore:"
       - "^test:"
 
-# Updates a cask in github.com/TedHaley/homebrew-tap on each release.
-# After `brew tap TedHaley/homebrew-tap`, macOS users can `brew install cheep`.
-# (Homebrew casks are macOS-only; Linux users should use `go install` or a direct download.)
-homebrew_casks:
+# Publishes a Homebrew FORMULA (not a cask) to github.com/TedHaley/homebrew-tap.
+# A formula installs the CLI binaries straight into Homebrew's bin — no cask,
+# no Gatekeeper "unverified developer" quarantine — and gives a clean one-liner:
+#   brew install TedHaley/homebrew-tap/cheep
+# Works on macOS and Linux (Homebrew on Linux included).
+brews:
   - name: cheep
-    binaries:
-      - cheep
     repository:
       owner: TedHaley
       name: homebrew-tap
       branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: "https://tedhaley.ca/cheep/"
-    description: "A Claude orchestrator that coordinates local Qwen executor agents."
-    # The binary is unsigned, so strip the Gatekeeper quarantine flag on install.
-    # (Replace with proper code-signing later to remove this workaround.)
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/cheep"]
-          end
+    description: "The most results per dollar: a smart orchestrator coordinates cheap/local executor agents."
+    license: "MIT"
+    install: |
+      bin.install "cheep"
+      bin.install "cheep-claude-mcp"
+    test: |
+      system "#{bin}/cheep", "version"
