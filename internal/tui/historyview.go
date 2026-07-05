@@ -131,7 +131,7 @@ func replayLines(msg core.Message, w int) []string {
 	}
 	switch msg.Role {
 	case "user":
-		return []string{userSt.Render("› " + t)}
+		return []string{userLine(t, w)}
 	case "assistant":
 		return renderMarkdown(t, w)
 	}

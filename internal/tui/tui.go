@@ -27,6 +27,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/approve"
@@ -171,6 +172,15 @@ var (
 	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 	sepSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("238")) // dim gray for separator
 )
+
+// userLine renders a user message for the log, wrapped to the window width —
+// the tab viewport does not wrap, so an unwrapped long message runs off-page.
+func userLine(text string, w int) string {
+	if w < 20 {
+		w = 80
+	}
+	return userSt.Render(wordwrap.String("› "+text, w-2))
+}
 
 // renderMarkdown renders assistant text as styled markdown, bulleted on line 1.
 func renderMarkdown(md string, width int) []string {
@@ -1065,7 +1075,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.started = time.Now()
 		return m, tea.Batch(m.sp.Tick, bashCmd(cmdStr))
 	}
-	return m.sendUser(text, userSt.Render("› "+text))
+	return m.sendUser(text, userLine(text, m.w))
 }
 
 // sendUser routes a user message to the orchestrator with the usual guards
@@ -1105,7 +1115,7 @@ func (m model) sendUser(text, display string) (tea.Model, tea.Cmd) {
 }
 
 func (m model) startTask(text string) (tea.Model, tea.Cmd) {
-	return m.runMessage(text, userSt.Render("› "+text))
+	return m.runMessage(text, userLine(text, m.w))
 }
 
 // runMessage sends text to the orchestrator, showing `display` in the log.
@@ -1396,7 +1406,7 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		name := strings.TrimPrefix(strings.Fields(text)[0], "/")
 		if t, ok := prompts.Find(m.workdir, name); ok {
 			args := strings.TrimSpace(strings.TrimPrefix(text, "/"+name))
-			return m.sendUser(prompts.Expand(t, args), userSt.Render("› "+text))
+			return m.sendUser(prompts.Expand(t, args), userLine(text, m.w))
 		}
 		m.footer = "unknown command " + strings.Fields(text)[0]
 	}

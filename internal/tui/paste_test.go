@@ -110,3 +110,39 @@ func TestLongLineWrapGrowsInput(t *testing.T) {
 		t.Fatalf("input height = %d for a %d-char line in an 80-wide window; want >= 3 wrapped rows", h, len(long))
 	}
 }
+
+// TestReplayWrapsLongUserMessages: resumed history must wrap user text to the
+// window width — the tab viewport does not wrap overflowing lines.
+func TestReplayWrapsLongUserMessages(t *testing.T) {
+	long := strings.Repeat("resume wrap check ", 30) // ~540 chars
+	lines := replayLines(core.Message{Role: "user", Text: long}, 80)
+	if len(lines) != 1 {
+		t.Fatalf("want one (multi-row) entry, got %d", len(lines))
+	}
+	for i, row := range strings.Split(lines[0], "\n") {
+		if w := len([]rune(stripAnsi(row))); w > 80 {
+			t.Fatalf("row %d is %d cols wide, exceeds the 80-col window", i, w)
+		}
+	}
+	if rows := strings.Count(lines[0], "\n") + 1; rows < 6 {
+		t.Fatalf("expected ~7 wrapped rows, got %d", rows)
+	}
+}
+
+func stripAnsi(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for _, r := range s {
+		switch {
+		case r == '\x1b':
+			inEsc = true
+		case inEsc:
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEsc = false
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
