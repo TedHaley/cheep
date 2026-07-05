@@ -500,9 +500,15 @@ func (m *model) rebuild(keep bool) {
 func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg)}
 	if m.inline {
-		for _, l := range m.tabs[0].lines { // banner + welcome, once
-			cmds = append(cmds, tea.Println(l))
+		// Print the banner + welcome once, in ORDER: Batch runs commands
+		// concurrently, so the block must go through a single Sequence or
+		// the lines land scrambled.
+		prints := make([]tea.Cmd, len(m.tabs[0].lines))
+		for i, l := range m.tabs[0].lines {
+			l := l
+			prints[i] = tea.Println(l)
 		}
+		cmds = append(cmds, tea.Sequence(prints...))
 	}
 	if m.overlay == "setupwiz" { // first launch / unusable orchestrator — scan now
 		cmds = append(cmds, wizDiscoverCmd())
