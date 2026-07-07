@@ -27,6 +27,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/reflow/wordwrap"
 
 	"github.com/TedHaley/cheep/internal/agent"
@@ -864,17 +865,33 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.footer = "verifying new orchestrator " + fresh.Orchestrator.Model + " …"
 			return m, verifyConfigCmd(fresh)
 		}
-		// Backstop: the orchestrator stopped with unfinished todos. Nudge it to
-		// keep going — whether or not it delegated this turn (it may have done
-		// one phase and quit with more pending). Bounded per user message so a
-		// model that keeps stopping short can't run away.
-		if m.mode == orchestrator.ModeAuto && len(m.cfg.Executors) > 0 &&
-			msg.r.Status == "completed" && m.openTodos > 0 && m.nudges < 3 {
+		// Backstop: the orchestrator stopped short. Nudge it to keep going —
+		// whether or not it delegated this turn (it may have done one phase
+		// and quit with more pending, or just narrated a plan without acting
+		// on it). Bounded per user message so a model that keeps stopping
+		// short can't run away.
+		//   - auto mode: only nudge when todos prove work is left (its own
+		//     contract has no other "not done yet" signal).
+		//   - loop mode: its contract is "never stop except goal-met /
+		//     plateau / budget / user" — so nudge on ANY unqualified stop,
+		//     todos or not (NUMERIC goals track progress via iterate_metric/
+		//     iterate_until, not update_todos, so openTodos may read 0 mid-goal).
+		autoUnfinished := m.mode == orchestrator.ModeAuto && m.openTodos > 0
+		loopUnfinished := m.mode == orchestrator.ModeLoop
+		if (autoUnfinished || loopUnfinished) && len(m.cfg.Executors) > 0 &&
+			msg.r.Status == "completed" && m.nudges < 3 {
 			m.nudges++
 			nudge := "There are still unfinished todos. Keep going: delegate the next open " +
 				"item(s) to your executors and verify the results. Don't stop until every todo " +
 				"is done or you hit a real blocker you must tell me about — act, don't just describe."
-			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: finishing open todos"))
+			hint := "finishing open todos"
+			if loopUnfinished {
+				nudge = "LOOP MODE is still on. If you already reached the goal or hit a genuine " +
+					"plateau, say so explicitly and stop. Otherwise keep iterating: measure, delegate " +
+					"the next chunk, verify — act, don't just describe what you're about to check."
+				hint = "loop mode is still on"
+			}
+			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: "+hint))
 		}
 		if len(m.queue) > 0 { // run the next queued message
 			if m.overBudget() {
@@ -1913,9 +1930,20 @@ func (m model) tabBar() string {
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 	// Once there's more than the orchestrator tab, surface how to reach the
 	// executor / reviewer tabs — the hotkey isn't otherwise discoverable.
+	// Only add it if it still fits on one line; see the truncation note below.
 	if len(m.tabs) > 1 {
-		bar = lipgloss.JoinHorizontal(lipgloss.Top, bar,
-			hintSt.Render("   tab / ⌥tab: switch agents · ^W: close"))
+		hint := hintSt.Render("   tab / ⌥tab: switch agents · ^W: close")
+		if m.w <= 0 || lipgloss.Width(bar)+lipgloss.Width(hint) <= m.w {
+			bar = lipgloss.JoinHorizontal(lipgloss.Top, bar, hint)
+		}
+	}
+	// Tabs accumulate over a long session; keep the bar to a single line no
+	// matter how many pile up. relayout() budgets a fixed row for the tab
+	// bar, and Style.Render's Width() word-wraps rather than truncates — an
+	// overflowing bar would wrap onto a second line and push everything
+	// below it (including the tabs themselves) out of the viewport.
+	if m.w > 0 && lipgloss.Width(bar) > m.w {
+		bar = ansi.TruncateWc(bar, m.w, "…")
 	}
 	return barSt.Width(m.w).Render(bar)
 }
