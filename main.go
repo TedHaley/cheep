@@ -29,6 +29,7 @@ import (
 	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
 	"github.com/TedHaley/cheep/internal/tui"
+	"github.com/TedHaley/cheep/internal/update"
 	"github.com/TedHaley/cheep/internal/validate"
 	"github.com/TedHaley/cheep/internal/worktree"
 
@@ -88,6 +89,8 @@ func main() {
 		cmdJobs(os.Args[2:])
 	case "daemon":
 		cmdDaemon(os.Args[2:])
+	case "upgrade", "update":
+		cmdUpgrade()
 	case "version", "-v", "--version":
 		fmt.Printf("cheep %s\n", version)
 	case "-h", "--help", "help":
@@ -128,6 +131,8 @@ Usage:
                                  manage recurring scheduled tasks
   cheep daemon                   run scheduled jobs on their cadence (keep it
                                  running, e.g. in tmux)
+  cheep upgrade                  update cheep to the latest release (brew or
+                                 a direct binary self-replace)
   cheep version                  print the version
 
 On first use, cheep walks you through choosing an orchestrator and, optionally,
@@ -1151,6 +1156,34 @@ func cmdCheck() {
 		fmt.Printf("Executor      %-24s ", fmt.Sprintf("%s (%s)", e.Name, e.Model))
 		ping(provider.For(e.Provider, e.Endpoint, e.APIKey, 16), e.Model)
 	}
+}
+
+func cmdUpgrade() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	fmt.Printf("current version: %s\n", version)
+	rel, err := update.Latest(ctx)
+	if err != nil {
+		fatal(fmt.Errorf("checking for updates: %w", err))
+	}
+	if !update.IsNewer(version, rel.Version) {
+		fmt.Printf("%salready on the latest (%s)%s\n", cGreen, rel.Version, cReset)
+		return
+	}
+	fmt.Printf("upgrading %s → %s …\n", version, rel.Version)
+	res, err := update.Upgrade(ctx, rel.Version)
+	if strings.TrimSpace(res.Output) != "" {
+		fmt.Println(strings.TrimSpace(res.Output))
+	}
+	if err != nil {
+		fatal(err)
+	}
+	via := ""
+	if res.Via == "brew" {
+		via = " via Homebrew"
+	}
+	fmt.Printf("%s✓ upgraded to %s%s%s\n", cGreen, rel.Version, via, cReset)
 }
 
 func ping(p core.Provider, model string) {

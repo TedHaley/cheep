@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TedHaley/cheep/internal/agent"
@@ -242,8 +243,9 @@ type execRuntime struct {
 	provider   core.Provider
 	maxTurns   int
 	budget     int
-	compact    int // self-compaction trigger (executor context management)
-	timeout    time.Duration
+	compact    int           // self-compaction trigger (executor context management)
+	timeout    time.Duration // max IDLE time (no events) before an attempt is cut — resets on progress
+	maxWall    time.Duration // absolute wall-clock backstop, even for a chatty-but-stuck executor
 	maxResumes int
 	extra      []core.Tool
 	onEvent    core.EventFunc
@@ -272,8 +274,75 @@ func (e execRuntime) newSession(workdir, label string) *agent.Session {
 	return a.NewSession()
 }
 
-// runSupervised runs the subtask with a wall-clock timeout. If it ends short
-// (timeout, looping, max_turns, context_exhausted), it summarizes the progress
+// runAttempt runs one executor session under an IDLE watchdog: the deadline is
+// reset every time the executor emits an event, so an executor the orchestrator
+// can watch making progress is never cut off. Only genuine inactivity (no
+// events for e.timeout) ends it early — plus an absolute wall-clock backstop
+// (e.maxWall) so a chatty-but-stuck executor can't run forever. An idle cut is
+// relabelled "timeout" so the supervisor resumes it (it stalled, we didn't
+// choose to stop it).
+func (e execRuntime) runAttempt(parent context.Context, workdir, task, label string) (agent.RunResult, *agent.Session) {
+	idle := e.timeout
+	if idle <= 0 {
+		idle = 10 * time.Minute
+	}
+	hardCap := e.maxWall
+	if hardCap <= 0 {
+		hardCap = 60 * time.Minute
+	}
+	if hardCap < idle {
+		hardCap = idle
+	}
+	ctx, cancel := context.WithTimeout(parent, hardCap)
+	defer cancel()
+
+	// Every event the session emits pokes the watchdog; a full buffer already
+	// means "activity pending", so a dropped poke is harmless.
+	activity := make(chan struct{}, 1)
+	er := e
+	er.onEvent = func(ev core.Event) {
+		select {
+		case activity <- struct{}{}:
+		default:
+		}
+		e.onEvent(ev)
+	}
+	sess := er.newSession(workdir, label)
+
+	var idledOut atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		timer := time.NewTimer(idle)
+		defer timer.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-activity:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(idle)
+			case <-timer.C:
+				idledOut.Store(true)
+				cancel()
+				return
+			}
+		}
+	}()
+	r := sess.SendCtx(ctx, task)
+	close(done)
+	if idledOut.Load() && parent.Err() == nil {
+		r.Status = "timeout" // stalled, not user-aborted → resumable
+	}
+	return r, sess
+}
+
+// runSupervised runs the subtask under an idle watchdog (see runAttempt). If it
+// ends short (timeout, looping, max_turns, context_exhausted), it summarizes the progress
 // and resumes in a fresh session with that handoff, up to maxResumes times.
 // label is the executor instance's display name (e.g. "qwen-local#2"); all its
 // events carry it so the UI can group them into one tab.
@@ -284,10 +353,7 @@ func (e execRuntime) runSupervised(parent context.Context, workdir, subtask, lab
 	var r agent.RunResult
 	var sess *agent.Session
 	for attempt := 0; ; attempt++ {
-		ctx, cancel := context.WithTimeout(parent, e.timeout)
-		sess = e.newSession(workdir, label)
-		r = sess.SendCtx(ctx, task)
-		cancel()
+		r, sess = e.runAttempt(parent, workdir, task, label)
 
 		totalIn += r.InputTokens
 		totalOut += r.OutputTokens
@@ -746,6 +812,7 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 			budget:     e.TokenBudget,
 			compact:    e.ContextBudget,
 			timeout:    time.Duration(e.TimeoutSeconds) * time.Second,
+			maxWall:    time.Duration(e.HardTimeoutSeconds) * time.Second,
 			maxResumes: e.MaxResumes,
 			extra:      extraExec,
 			onEvent:    onEvent,

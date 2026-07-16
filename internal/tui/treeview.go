@@ -95,7 +95,7 @@ func (m model) doFork(msgIdx int) (tea.Model, tea.Cmd) {
 	if m.inline {
 		m.pendingOut = append(m.pendingOut, replay...)
 	} else {
-		m.tabs[0].lines = append(welcomeLines(m.cfg, m.connectivity), replay...)
+		m.tabs[0].lines = append(welcomeLines(m.cfg, m.connectivity, m.w), replay...)
 	}
 	m.overlay = ""
 	m.active, m.follow = 0, true

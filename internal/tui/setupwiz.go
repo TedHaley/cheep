@@ -420,7 +420,7 @@ func (m model) applyWizConfig(cfg config.Config, okMsg string) (tea.Model, tea.C
 	m.overlay = ""
 	(&m).rebuild(true)
 
-	banner := welcomeLines(m.cfg, nil)
+	banner := welcomeLines(m.cfg, nil, m.w)
 	if len(m.tabs[0].lines) == m.welcomeLen { // banner untouched — replace it
 		m.tabs[0].lines = banner
 	} else { // mid-session — append a fresh banner

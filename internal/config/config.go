@@ -93,8 +93,9 @@ type Agent struct {
 	ContextBudget int `json:"context_budget,omitempty"`
 
 	// Executor supervision.
-	TimeoutSeconds int `json:"timeout_seconds,omitempty"` // wall-clock abort per run
-	MaxResumes     int `json:"max_resumes,omitempty"`     // resume-with-summary attempts
+	TimeoutSeconds     int `json:"timeout_seconds,omitempty"`      // max IDLE time (no events) per attempt — resets on progress
+	HardTimeoutSeconds int `json:"hard_timeout_seconds,omitempty"` // absolute wall-clock backstop per attempt
+	MaxResumes         int `json:"max_resumes,omitempty"`          // resume-with-summary attempts
 
 	// Optional cost overrides for the spend estimate, in USD per 1M tokens.
 	// When unset, cheep uses a built-in table (and treats local models as free).
@@ -422,7 +423,13 @@ func (c *Config) ApplyDefaults() {
 			e.TokenBudget = 100000
 		}
 		if e.TimeoutSeconds == 0 {
-			e.TimeoutSeconds = 300
+			// Idle limit, not wall-clock: it resets whenever the executor emits
+			// an event, so a working executor is never cut off. This only fires
+			// after genuine silence, so it can be generous.
+			e.TimeoutSeconds = 600
+		}
+		if e.HardTimeoutSeconds == 0 {
+			e.HardTimeoutSeconds = 3600 // absolute backstop for a stuck-but-chatty run
 		}
 		if e.MaxResumes == 0 {
 			e.MaxResumes = 2

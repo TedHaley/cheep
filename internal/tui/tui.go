@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -42,6 +43,7 @@ import (
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/prompts"
 	"github.com/TedHaley/cheep/internal/provider"
+	"github.com/TedHaley/cheep/internal/update"
 )
 
 const bannerArt = ` ██████╗██╗  ██╗███████╗███████╗██████╗ ██╗
@@ -91,16 +93,17 @@ type model struct {
 	active int
 	follow bool
 
-	vp      viewport.Model
-	input   textarea.Model
-	sp      spinner.Model
-	w, h    int
-	ready   bool
-	running bool
-	started time.Time
-	cancel  context.CancelFunc
-	queue   []string // messages typed while a task is running
-	footer  string
+	vp        viewport.Model
+	input     textarea.Model
+	sp        spinner.Model
+	w, h      int
+	ready     bool
+	running   bool
+	started   time.Time
+	cancel    context.CancelFunc
+	queue     []string // messages typed while a task is running
+	footer    string
+	updateVer string // newer release the launch check found ("" if none/current)
 
 	lastKeyAt time.Time // previous keypress time — sub-10ms Enters are paste bursts, not submits
 
@@ -123,6 +126,7 @@ type model struct {
 
 	connectivity map[string]string // label -> "ok"/"unreachable"/"needs API key"
 	welcomeLen   int               // length of the initial banner block (for refresh)
+	welcomeShown bool              // inline: banner has been printed to scrollback (once, at known width)
 
 	ctxTokens  int               // orchestrator conversation size estimate (context bar)
 	usage      map[string][2]int // model -> {input, output} tokens this session
@@ -164,7 +168,7 @@ type model struct {
 	jobsList   []jobs.Job // /scheduled overlay rows
 	jobsCursor int
 
-	suggestions   []string           // next-step chips parsed from the last reply (1–N to use)
+	suggestions   []string           // next-step suggestions from the last reply; [0] shown as input ghost text (Tab accepts)
 	suggestCancel context.CancelFunc // aborts an in-flight async suggestion call
 }
 
@@ -177,9 +181,12 @@ var (
 	okSt        = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	errSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	userSt      = lipgloss.NewStyle().Bold(true)
-	todoDoneSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	todoProgSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
-	sepSt       = lipgloss.NewStyle().Foreground(lipgloss.Color("238")) // dim gray for separator
+	// userMsgSt tints your own messages with a faint grey block so they stand
+	// out from the agent's default-background replies (Claude-style).
+	userMsgSt  = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236"))
+	todoDoneSt = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	todoProgSt = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+	sepSt      = lipgloss.NewStyle().Foreground(lipgloss.Color("238")) // dim gray for separator
 )
 
 // userLine renders a user message for the log, wrapped to the window width —
@@ -188,7 +195,14 @@ func userLine(text string, w int) string {
 	if w < 20 {
 		w = 80
 	}
-	return userSt.Render(wordwrap.String("› "+text, w-2))
+	// Pad every wrapped row to a uniform width so the grey tint reads as one
+	// clean block rather than a ragged highlight around the glyphs.
+	width := w - 2
+	lines := strings.Split(wordwrap.String("› "+text, width), "\n")
+	for i, l := range lines {
+		lines[i] = userMsgSt.Width(width).Render(l)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // splitSuggestions pulls a trailing "[[NEXT]] a | b | c" line (emitted by the
@@ -262,13 +276,19 @@ func (m model) suggestCmd(ctx context.Context, reply string) tea.Cmd {
 	}
 }
 
-// suggestionLines renders the next-step chips shown above the input.
-func (m model) suggestionLines() []string {
-	out := []string{hintSt.Render("next ") + hintSt.Render("· press 1–"+strconv.Itoa(len(m.suggestions))+" to use")}
-	for i, s := range m.suggestions {
-		out = append(out, todoProgSt.Render("  "+strconv.Itoa(i+1)+" ")+short(s, max(20, m.w-8)))
+// defaultPlaceholder is the empty-box hint shown when there's no suggestion.
+const defaultPlaceholder = "type a task, or /help"
+
+// refreshPlaceholder shows the top next-step suggestion as ghost text inside the
+// input box (accept with Tab), Claude-style — or the default hint when there's
+// none. The textarea only renders the placeholder while the box is empty, so it
+// naturally disappears the moment you start typing.
+func (m *model) refreshPlaceholder() {
+	if len(m.suggestions) > 0 {
+		m.input.Placeholder = m.suggestions[0]
+	} else {
+		m.input.Placeholder = defaultPlaceholder
 	}
-	return out
 }
 
 // renderMarkdown renders assistant text as styled markdown, bulleted on line 1.
@@ -370,7 +390,8 @@ func queueHeaderLines(queued []string) []string {
 	if len(queued) == 0 {
 		return nil
 	}
-	out := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")).Render("Queued Tasks")}
+	out := []string{lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4")).Render("Queued Tasks") +
+		hintSt.Render("  (/queue rm N to remove)")}
 	for i, q := range queued {
 		out = append(out, "  "+hintSt.Render(fmt.Sprintf("%d. %s", i+1, short(q, 100))))
 	}
@@ -410,6 +431,14 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 		os.Stdout.WriteString("\x1b[?1007l")       // no wheel→arrow translation
 		defer os.Stdout.WriteString("\x1b[?1007h") // restore the common default
 	}
+	// Enable the kitty keyboard protocol (the same mechanism Claude Code uses)
+	// so the terminal reports Shift+Enter and friends, and feed input through a
+	// reader that translates those sequences into forms Bubble Tea v1
+	// understands. See internal/tui/keyboard.go.
+	os.Stdout.WriteString(kbEnable)
+	defer os.Stdout.WriteString(kbDisable)
+	opts = append(opts, tea.WithInput(newTranslatingReader(os.Stdin)))
+
 	p := tea.NewProgram(m, opts...)
 	go func() {
 		for e := range events {
@@ -427,7 +456,7 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 
 func newModel(cfg config.Config, workdir string, events chan core.Event, extraOrch, extraExec []core.Tool, firstRun bool) model {
 	ta := textarea.New()
-	ta.Placeholder = "type a task, or /help"
+	ta.Placeholder = defaultPlaceholder
 	ta.Prompt = "› "
 	ta.ShowLineNumbers = false
 	ta.SetHeight(1)
@@ -463,7 +492,7 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 			default: // drop rather than block an agent if the UI falls behind
 			}
 		},
-		tabs:      []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg, nil)}},
+		tabs:      []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(cfg, nil, 0)}},
 		byName:    map[string]int{"orchestrator": 0, "cheep": 0},
 		usage:     map[string][2]int{},
 		usageRole: map[string][2]int{},
@@ -535,7 +564,10 @@ func gradientBanner() []string {
 // welcomeLines renders the banner beside a bordered config box as the
 // orchestrator tab's opening content (it scrolls away as you work). conn maps a
 // label ("orchestrator" / "exec:<name>") to a connectivity status.
-func welcomeLines(cfg config.Config, conn map[string]string) []string {
+func welcomeLines(cfg config.Config, conn map[string]string, w int) []string {
+	if w <= 0 {
+		w = 80
+	}
 	mark := func(label, base string) string {
 		if s := conn[label]; s != "" && s != "ok" {
 			return base + "  " + errSt.Render("✗ "+s)
@@ -570,13 +602,25 @@ func welcomeLines(cfg config.Config, conn map[string]string) []string {
 		BorderForeground(lipgloss.Color("240")).
 		Padding(0, 1).Render(boxBody)
 
-	header := lipgloss.JoinHorizontal(lipgloss.Center,
-		strings.Join(gradientBanner(), "\n"), "   ", box)
+	banner := strings.Join(gradientBanner(), "\n")
+	header := lipgloss.JoinHorizontal(lipgloss.Center, banner, "   ", box)
+	if lipgloss.Width(header) > w {
+		// Too wide to sit side by side — stack the box under the banner so the
+		// lines stay within the terminal width.
+		header = lipgloss.JoinVertical(lipgloss.Left, banner, "", box)
+	}
 
 	out := []string{""} // top space
 	out = append(out, strings.Split(header, "\n")...)
 	out = append(out, "",
 		hintSt.Render("Tips: tab / ⌥tab switches agents (watch executors, reviewer) · shift+tab cycles modes · /help"), "")
+	// Hard guard: never emit a line wider than the terminal. An over-wide line
+	// soft-wraps in the scrollback and garbles when the pane is later resized.
+	for i, l := range out {
+		if lipgloss.Width(l) > w {
+			out[i] = ansi.Truncate(l, w, "")
+		}
+	}
 	return out
 }
 
@@ -609,19 +653,25 @@ func (m *model) rebuild(keep bool) {
 	m.session = orch.Resume(hist)
 }
 
+// disableAltScroll turns off the terminal's alternate-scroll mode (DEC 1007),
+// which translates the wheel into arrow keys. Without this, a wheel-up in the
+// full-screen UI arrives as ↑ and recalls the previous input instead of
+// scrolling the log. cheep disables it before the program starts, but entering
+// the alternate screen re-enables it on many terminals, so we reassert it once
+// the program is up (and again after /mouse toggles).
+func disableAltScroll() tea.Msg {
+	os.Stdout.WriteString("\x1b[?1007l")
+	return nil
+}
+
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg)}
-	if m.inline {
-		// Print the banner + welcome once, in ORDER: Batch runs commands
-		// concurrently, so the block must go through a single Sequence or
-		// the lines land scrambled.
-		prints := make([]tea.Cmd, len(m.tabs[0].lines))
-		for i, l := range m.tabs[0].lines {
-			l := l
-			prints[i] = tea.Println(l)
-		}
-		cmds = append(cmds, tea.Sequence(prints...))
+	cmds := []tea.Cmd{textarea.Blink, probeCmd(m.cfg), checkUpdateCmd()}
+	if !m.inline {
+		cmds = append(cmds, disableAltScroll)
 	}
+	// The inline banner is printed on the first WindowSizeMsg instead of here:
+	// it must be built at the real terminal width, or its wide art soft-wraps in
+	// the scrollback and garbles on later resizes/scroll.
 	if m.overlay == "setupwiz" { // first launch / unusable orchestrator — scan now
 		cmds = append(cmds, wizDiscoverCmd())
 	}
@@ -644,6 +694,54 @@ func orchestratorUsable(cfg config.Config) bool {
 // cheep always wants both roles configured.
 func needsSetup(cfg config.Config) bool {
 	return !orchestratorUsable(cfg) || len(cfg.Executors) == 0
+}
+
+// updateAvailableMsg is posted by the silent launch check when a newer release
+// exists. upgradeDoneMsg reports the outcome of an on-demand /upgrade.
+type updateAvailableMsg struct{ latest string }
+type upgradeDoneMsg struct {
+	via     string // "brew" or "binary"
+	from    string
+	to      string
+	already bool // already on the latest
+	output  string
+	err     error
+}
+
+// checkUpdateCmd quietly asks GitHub for the latest release and, only if it's
+// newer than the running build, posts updateAvailableMsg. Any error (offline,
+// rate-limited) is swallowed — a version check must never disrupt startup.
+func checkUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		rel, err := update.Latest(ctx)
+		if err != nil || !update.IsNewer(Version, rel.Version) {
+			return nil
+		}
+		return updateAvailableMsg{latest: rel.Version}
+	}
+}
+
+// upgradeCmd checks for a newer release and installs it (via brew or a binary
+// self-replace). Runs off the UI goroutine; posts upgradeDoneMsg when finished.
+func upgradeCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		rel, err := update.Latest(ctx)
+		if err != nil {
+			return upgradeDoneMsg{err: err}
+		}
+		if !update.IsNewer(Version, rel.Version) {
+			return upgradeDoneMsg{already: true, to: rel.Version}
+		}
+		res, err := update.Upgrade(ctx, rel.Version)
+		if err != nil {
+			return upgradeDoneMsg{to: rel.Version, output: res.Output, err: err}
+		}
+		return upgradeDoneMsg{via: res.Via, from: Version, to: rel.Version, output: res.Output}
+	}
 }
 
 type probeMsg map[string]string
@@ -694,12 +792,17 @@ func probeCmd(cfg config.Config) tea.Cmd {
 	}
 }
 
-// bashCmd runs a shell command and returns the result as a cmdResultMsg.
-func bashCmd(cmdStr string) tea.Cmd {
+// bashCmd runs a shell command and returns the result as a cmdResultMsg. The
+// caller's ctx makes the command interruptible (esc cancels it); a 30s timeout
+// is layered on top. On cancel we kill the whole process group so children of
+// `sh -c` die too, not just the shell.
+func bashCmd(ctx context.Context, cmdStr string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
 		var stdout, stderr strings.Builder
 		c.Stdout = &stdout
 		c.Stderr = &stderr
@@ -727,6 +830,24 @@ func (m *model) relayout() {
 	m.input.CursorEnd()
 }
 
+// maxInputRows caps how tall the input box grows before its inner viewport
+// starts scrolling to follow the cursor.
+const maxInputRows = 6
+
+// growForNewline enlarges the input box by one row (up to maxInputRows) BEFORE
+// a line break is inserted. bubbles/textarea scrolls its inner viewport to the
+// cursor while the break is applied, but never scrolls back once the box grows
+// afterward — so growing the box after the fact leaves the earlier lines
+// scrolled out of view until the next cursor move (which is why pressing ↑
+// "fixed" it). Growing first keeps the cursor inside the visible window, so no
+// scroll happens and every line stays visible. syncInputHeight then sets the
+// exact final height.
+func (m *model) growForNewline() {
+	if h := m.input.Height(); h < maxInputRows {
+		m.input.SetHeight(h + 1)
+	}
+}
+
 // syncInputHeight grows and shrinks the input box with its content (1–6
 // rows) and re-derives the viewport height. Called on every input change so
 // earlier lines never scroll out of view. Rows are counted VISUALLY: a long
@@ -746,26 +867,61 @@ func (m *model) syncInputHeight() {
 	if lines < 1 {
 		lines = 1
 	}
-	if lines > 6 {
-		lines = 6
+	if lines > maxInputRows {
+		lines = maxInputRows
 	}
 	m.input.SetHeight(lines)
-	header := 0
-	if len(m.tabs) > 0 {
-		// Account for todos
-		todoLines := todoHeaderLines(m.tabs[m.active].todos)
-		if len(todoLines) > 0 {
-			header += len(todoLines)
-		}
-		// Account for queue header
+	if len(m.tabs) == 0 {
+		return
+	}
+	// Size the log to fill whatever the fixed chrome doesn't. Count the rows
+	// belowViewport() will draw WITHOUT rendering them — the textarea shares an
+	// internal *viewport across struct copies, so calling m.input.View() here
+	// (a measurement pass) would scroll the real input box.
+	const above = 2 // tab-bar banner + its separator rule
+	below := 1      // the status/hint line at the very bottom
+	below += len(todoHeaderLines(m.tabs[m.active].todos))
+	if m.active != 0 {
+		below++ // the read-only executor notice
+	} else {
 		if m.running && len(m.queue) > 0 {
-			queueLines := queueHeaderLines(m.queue)
-			if len(queueLines) > 0 {
-				header += len(queueLines)
-			}
+			below += len(queueHeaderLines(m.queue))
+		}
+		// Next-step suggestions render as ghost text inside the input box (no
+		// extra rows), so nothing to budget here.
+		if len(m.comp.opts) > 0 {
+			below += len(m.comp.opts) + 1 // options + the tab/enter hint row
+		}
+		below += 2 + lines // top rule + input box + bottom rule
+	}
+	m.vp.Height = max(3, m.h-above-below)
+}
+
+// belowViewport returns the chrome rendered under the scrolling log: sticky
+// headers (todos, queue, suggestions, completions) and, on the orchestrator
+// tab, the input box. Executor tabs are read-only — they're driven by the
+// orchestrator, not typed at — so the input is replaced by a one-line notice.
+// View and syncInputHeight share this so the log height always matches what's
+// actually drawn.
+func (m model) belowViewport() []string {
+	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
+	var parts []string
+	if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
+		parts = append(parts, strings.Join(todos, "\n"))
+	}
+	if m.active != 0 {
+		return append(parts, hintSt.Render("▲ "+m.tabs[m.active].title+
+			" is driven by the orchestrator — read-only · press tab to return to the chat"))
+	}
+	if m.running && len(m.queue) > 0 {
+		if ql := queueHeaderLines(m.queue); len(ql) > 0 {
+			parts = append(parts, strings.Join(ql, "\n"))
 		}
 	}
-	m.vp.Height = max(3, m.h-4-lines-header) // tab bar + rule + rule + hint = 4
+	if comp := m.viewCompletions(); comp != "" {
+		parts = append(parts, comp)
+	}
+	return append(parts, rule, m.input.View(), rule)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -793,6 +949,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ovVP.Height = max(3, msg.Height-7)
 		m.ovInput.Width = max(10, msg.Width-10)
 		m.ready = true
+		// Build the banner at the now-known width so no line exceeds it. Inline
+		// mode prints it to the scrollback exactly once (here, not in Init);
+		// the full-screen UI just refreshes it in place while it's untouched.
+		if m.inline {
+			if !m.welcomeShown {
+				wl := welcomeLines(m.cfg, m.connectivity, m.w)
+				m.tabs[0].lines = wl
+				m.welcomeLen = len(wl)
+				m.pendingOut = append(m.pendingOut, wl...)
+				m.welcomeShown = true
+			}
+		} else if len(m.tabs) > 0 && len(m.tabs[0].lines) == m.welcomeLen {
+			m.tabs[0].lines = welcomeLines(m.cfg, m.connectivity, m.w)
+			m.welcomeLen = len(m.tabs[0].lines)
+		}
 		(&m).relayout()
 		(&m).syncViewport()
 		return m, nil
@@ -924,6 +1095,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// nothing (inline sentinel or a newer turn) already set/cleared them.
 		if !m.running && len(m.suggestions) == 0 && len(msg.sug) > 0 {
 			m.suggestions = msg.sug
+			(&m).refreshPlaceholder()
 			(&m).syncViewport()
 		}
 		return m, nil
@@ -956,7 +1128,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.tabs) > 0 && len(m.tabs[0].lines) == m.welcomeLen { // banner untouched
-			m.tabs[0].lines = welcomeLines(m.cfg, m.connectivity)
+			m.tabs[0].lines = welcomeLines(m.cfg, m.connectivity, m.w)
 			m.welcomeLen = len(m.tabs[0].lines)
 			(&m).syncViewport()
 		}
@@ -964,6 +1136,8 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cmdResultMsg:
 		m.running = false
+		m.cancel = nil
+		m.quitArmed = false
 		if msg.exit == 0 {
 			m.tabs[0].status = "ok"
 			m.footer = "command exited 0"
@@ -993,7 +1167,7 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.keepTabs = msg.cfg.KeepTabs
 			(&m).rebuild(true) // new providers, conversation preserved
 			(&m).appendLine(0, "")
-			for _, l := range welcomeLines(msg.cfg, m.connectivity) { // re-show banner with new models
+			for _, l := range welcomeLines(msg.cfg, m.connectivity, m.w) { // re-show banner with new models
 				(&m).appendLine(0, l)
 			}
 			m.footer = "✓ switched orchestrator to " + msg.cfg.Orchestrator.Model
@@ -1011,6 +1185,31 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		return m, cmd
+
+	case updateAvailableMsg:
+		m.updateVer = msg.latest
+		m.footer = "cheep " + msg.latest + " is available — /upgrade to install"
+		return m, nil
+
+	case upgradeDoneMsg:
+		switch {
+		case msg.err != nil:
+			m.footer = "upgrade failed: " + errText(msg.err)
+		case msg.already:
+			m.updateVer = ""
+			m.footer = "already on the latest (" + msg.to + ")"
+		default:
+			m.updateVer = ""
+			via := ""
+			if msg.via == "brew" {
+				via = " via Homebrew"
+			}
+			note := "✓ upgraded " + msg.from + " → " + msg.to + via + " — restart cheep to run the new version"
+			(&m).appendLine(0, hintSt.Render(note))
+			m.footer = note
+			(&m).syncViewport()
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		sincePrevKey := time.Since(m.lastKeyAt)
@@ -1043,8 +1242,35 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		// Executor tabs are read-only — there's no input box to type into (they're
+		// driven by the orchestrator). Route scroll keys to the log, let global
+		// navigation fall through, and swallow anything that would edit/submit.
+		if m.active != 0 {
+			switch msg.String() {
+			case "up", "down", "k", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "u", "d", "b", "f", " ":
+				m.vp, _ = m.vp.Update(msg)
+				m.follow = m.vp.AtBottom()
+				return m, nil
+			case "ctrl+c", "esc", "ctrl+w", "shift+tab",
+				"tab", "alt+tab", "ctrl+right", "alt+shift+tab", "ctrl+left":
+				// fall through to the shared handlers below
+			default:
+				return m, nil // ignore typing on a read-only executor tab
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
+			// With a draft in the box, Ctrl+C clears it (like Claude Code)
+			// instead of quitting. Also drops out of history browsing.
+			if m.active == 0 && m.input.Value() != "" {
+				m.input.Reset()
+				m.histIdx = len(m.inputHist)
+				m.histDraft = ""
+				m.quitArmed = false
+				m.footer = ""
+				(&m).relayout()
+				return m, nil
+			}
 			// Don't tear down mid-run on a single keypress: agents may hold
 			// work that only lands at the merge boundary.
 			if m.running && !m.quitArmed {
@@ -1077,9 +1303,19 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			(&m).rebuild(true)
 			return m, nil
 		case "tab", "alt+tab", "ctrl+right":
-			// Next agent. alt+tab (Option+Tab) is the mac-friendly binding;
+			// Plain Tab accepts the ghost suggestion when one is showing (idle,
+			// empty box) — like accepting an autosuggestion. Otherwise Tab moves
+			// to the next agent. alt+tab (Option+Tab) is the mac-friendly binding;
 			// ctrl+right kept for other platforms (it collides with macOS
 			// Mission Control, so Option+Tab is preferred there).
+			if msg.String() == "tab" && m.active == 0 && m.input.Value() == "" && len(m.suggestions) > 0 {
+				m.input.SetValue(m.suggestions[0])
+				m.input.CursorEnd()
+				m.suggestions = nil
+				(&m).refreshPlaceholder()
+				(&m).syncInputHeight()
+				return m, nil
+			}
 			if len(m.tabs) > 0 {
 				m.active = (m.active + 1) % len(m.tabs)
 				m.follow = true
@@ -1108,18 +1344,6 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				(&m).relayout()
 				return m, nil
 			}
-		case "1", "2", "3":
-			// Accept a next-step suggestion into the input (Tab stays for
-			// autocomplete). Only when the line is empty, so digits type normally.
-			if m.input.Value() == "" && len(m.suggestions) > 0 {
-				if n := int(msg.String()[0] - '1'); n < len(m.suggestions) {
-					m.input.SetValue(m.suggestions[n])
-					m.input.CursorEnd()
-					m.suggestions = nil
-					(&m).syncInputHeight()
-					return m, nil
-				}
-			}
 		case "pgup":
 			m.follow = false
 			m.vp, _ = m.vp.Update(msg)
@@ -1128,12 +1352,24 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp, _ = m.vp.Update(msg)
 			m.follow = m.vp.AtBottom()
 			return m, nil
+		case "shift+enter", "alt+enter", "ctrl+j":
+			// Insert a line break. Grow the box first so the textarea's inner
+			// viewport doesn't scroll the earlier lines out of view (see
+			// growForNewline). shift+enter/ctrl+enter/ctrl+j arrive here as
+			// alt+enter after the keyboard translation layer.
+			(&m).growForNewline()
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			(&m).syncInputHeight()
+			(&m).updateCompletions()
+			return m, cmd
 		case "enter":
 			// Terminals without bracketed paste replay a paste as keystrokes:
 			// every newline arrives as a real Enter, which would submit each
 			// line. Key events that close together can only be a paste —
 			// insert the newline instead (like Claude Code).
 			if sincePrevKey < 10*time.Millisecond {
+				(&m).growForNewline()
 				m.input.InsertString("\n")
 				(&m).syncInputHeight()
 				return m, nil
@@ -1222,7 +1458,9 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 		m.active = 0
 		m.follow = true
 		m.started = time.Now()
-		return m, tea.Batch(m.sp.Tick, bashCmd(cmdStr))
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancel = cancel
+		return m, tea.Batch(m.sp.Tick, bashCmd(ctx, cmdStr))
 	}
 	return m.sendUser(text, userLine(text, m.w))
 }
@@ -1270,6 +1508,7 @@ func (m model) startTask(text string) (tea.Model, tea.Cmd) {
 // runMessage sends text to the orchestrator, showing `display` in the log.
 func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 	m.suggestions = nil // last turn's suggestions are stale once we act
+	m.refreshPlaceholder()
 	if m.suggestCancel != nil {
 		m.suggestCancel() // free the endpoint from any in-flight suggestion call
 		m.suggestCancel = nil
@@ -1341,11 +1580,13 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		m.cfg.MouseOff = !m.mouseOn
 		_ = config.Save(m.cfg) // sticky across sessions
 		if m.mouseOn {
-			m.footer = "mouse capture ON (saved) — wheel scrolls tabs; hold Option/Shift to select text, or /copy"
+			m.footer = "mouse capture ON (saved) — wheel scrolls the conversation; hold Option (macOS) or Shift to select & copy text"
 			return m, tea.EnableMouseCellMotion
 		}
-		m.footer = "mouse capture OFF (saved) — select/copy text normally; scroll with pgup/pgdn"
-		return m, tea.DisableMouse
+		m.footer = "mouse capture OFF (saved) — select/copy text natively; scroll with the wheel disabled, use pgup/pgdn (or /copy)"
+		// Re-disable alt-scroll so the wheel can't spray ↑/↓ (history recall) now
+		// that we're no longer capturing it as mouse events.
+		return m, tea.Sequence(tea.DisableMouse, disableAltScroll)
 	case "/copy":
 		if m.session == nil {
 			m.footer = "nothing to copy yet"
@@ -1375,9 +1616,11 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		} else {
 			m.footer = "keep-tabs OFF — finished executor tabs auto-close at turn end"
 		}
+	case "/queue", "/dequeue", "/unqueue":
+		return m.queueCmd(text)
 	case "/clear":
 		(&m).saveHistory() // keep the conversation we're clearing
-		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg, m.connectivity)}}
+		m.tabs = []*tab{{id: "orchestrator", title: "orchestrator", lines: welcomeLines(m.cfg, m.connectivity, m.w)}}
 		m.welcomeLen = len(m.tabs[0].lines)
 		m.byName = map[string]int{"orchestrator": 0, "cheep": 0}
 		m.active = 0
@@ -1405,9 +1648,10 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		(&m).rebuild(true)
 		if m.cfg.SuggestOff {
 			m.suggestions = nil
+			(&m).refreshPlaceholder()
 			m.footer = "next-step suggestions OFF"
 		} else {
-			m.footer = "next-step suggestions ON — press 1–3 after a reply to use one"
+			m.footer = "next-step suggestions ON — after a reply, Tab accepts the suggested next step"
 		}
 	case "/scheduled", "/schedule":
 		return m.openScheduled()
@@ -1559,6 +1803,9 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 				m.footer = "usage: /budget <dollars> | off"
 			}
 		}
+	case "/upgrade", "/update":
+		m.footer = "checking for updates…"
+		return m, upgradeCmd()
 	case "/status":
 		for _, l := range statusLines(m.cfg) {
 			m.appendLine(m.active, l)
@@ -1605,6 +1852,56 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		}
 		m.footer = "unknown command " + strings.Fields(text)[0]
 	}
+	return m, nil
+}
+
+// queueCmd lists and removes messages waiting to run. /queue lists them,
+// /queue clear empties the queue, and /queue rm N (or /dequeue N, /unqueue N,
+// or a bare /queue N) drops one by its 1-based position — the same numbering
+// shown in the "Queued Tasks" panel.
+func (m model) queueCmd(text string) (tea.Model, tea.Cmd) {
+	f := strings.Fields(text)
+	cmd := strings.TrimPrefix(f[0], "/")
+	if len(m.queue) == 0 {
+		m.footer = "the queue is empty — messages you type while a task runs land here"
+		return m, nil
+	}
+	arg := ""
+	if len(f) > 1 {
+		arg = f[1]
+	}
+	if cmd == "queue" {
+		switch arg {
+		case "": // list
+			m.appendLine(0, hintSt.Render("queued messages — remove with /queue rm N, or /queue clear:"))
+			for i, q := range m.queue {
+				m.appendLine(0, "  "+hintSt.Render(fmt.Sprintf("%d. ", i+1))+short(q, 100))
+			}
+			m.active, m.follow = 0, true
+			(&m).syncViewport()
+			return m, nil
+		case "clear", "empty", "flush":
+			n := len(m.queue)
+			m.queue = nil
+			m.footer = fmt.Sprintf("cleared %d queued message(s)", n)
+			(&m).syncViewport()
+			return m, nil
+		case "rm", "remove", "del", "delete":
+			arg = "" // the index is the next field
+			if len(f) > 2 {
+				arg = f[2]
+			}
+		}
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(arg))
+	if err != nil || idx < 1 || idx > len(m.queue) {
+		m.footer = fmt.Sprintf("usage: /queue (list) · /queue rm <1-%d> · /queue clear", len(m.queue))
+		return m, nil
+	}
+	removed := m.queue[idx-1]
+	m.queue = append(m.queue[:idx-1:idx-1], m.queue[idx:]...)
+	m.footer = "removed from queue: " + short(removed, 60)
+	(&m).syncViewport()
 	return m, nil
 }
 
@@ -1760,6 +2057,7 @@ func (m *model) applyEvent(e core.Event) {
 		if idx == 0 { // pull "next step" suggestions off the orchestrator's reply
 			if clean, sug := splitSuggestions(txt); len(sug) > 0 {
 				txt, m.suggestions = clean, sug
+				m.refreshPlaceholder()
 			}
 		}
 		if strings.TrimSpace(txt) != "" {
@@ -1842,6 +2140,11 @@ func (m model) View() string {
 		status = hintSt.Render(fmt.Sprintf("%s %s (%ds · esc to cancel%s)", m.sp.View(), verb(elapsed), elapsed, q))
 	} else {
 		status = hintSt.Render("? for shortcuts")
+		if m.updateVer != "" {
+			// Persistent badge (survives footer changes) once the launch check
+			// finds a newer release.
+			status = hintSt.Render("↑ "+m.updateVer+" available · /upgrade") + "   " + status
+		}
 		if m.footer != "" {
 			status = m.footer + "   " + status
 		}
@@ -1876,35 +2179,18 @@ func (m model) View() string {
 				parts = append(parts, strings.Join(ql, "\n"))
 			}
 		}
-		if !m.running && len(m.suggestions) > 0 {
-			parts = append(parts, strings.Join(m.suggestionLines(), "\n"))
-		}
 		if comp := m.viewCompletions(); comp != "" {
 			parts = append(parts, comp)
 		}
 		parts = append(parts, rule, m.input.View(), hint)
 		return lipgloss.JoinVertical(lipgloss.Left, parts...)
 	}
-	// Banner stays at the top of the scrolling log; the todo checklist is a sticky
-	// panel just above the input.
-	parts := []string{m.tabBar(), m.vp.View()}
-	if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
-		parts = append(parts, strings.Join(todos, "\n"))
-	}
-	// Show queued tasks below todos when running
-	if m.running && len(m.queue) > 0 {
-		queueLines := queueHeaderLines(m.queue)
-		if len(queueLines) > 0 {
-			parts = append(parts, strings.Join(queueLines, "\n"))
-		}
-	}
-	if !m.running && len(m.suggestions) > 0 {
-		parts = append(parts, strings.Join(m.suggestionLines(), "\n"))
-	}
-	if comp := m.viewCompletions(); comp != "" {
-		parts = append(parts, comp)
-	}
-	parts = append(parts, rule, m.input.View(), rule, hint)
+	// The tab bar is a fixed banner pinned to the top; the log scrolls beneath
+	// it and never covers it. belowViewport supplies the sticky panels and the
+	// input box (hidden on read-only executor tabs).
+	parts := []string{m.tabBar(), m.bannerSep(), m.vp.View()}
+	parts = append(parts, m.belowViewport()...)
+	parts = append(parts, hint)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
@@ -1915,6 +2201,12 @@ func verb(elapsed int) string {
 		"Wrangling", "Summoning", "Percolating", "Tinkering", "Computing", "Vibing",
 	}
 	return verbs[(elapsed/4)%len(verbs)] + "…"
+}
+
+// bannerSep is the rule under the tab-bar banner that separates the fixed
+// agent banner from the scrolling conversation below it.
+func (m model) bannerSep() string {
+	return sepSt.Render(strings.Repeat("─", max(1, m.w)))
 }
 
 func (m model) tabBar() string {
