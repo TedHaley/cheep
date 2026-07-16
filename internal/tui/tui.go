@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -801,8 +800,7 @@ func bashCmd(ctx context.Context, cmdStr string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		c := exec.CommandContext(ctx, "sh", "-c", cmdStr)
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+		killProcessGroup(c) // on cancel, kill children of `sh -c` too (Unix)
 		var stdout, stderr strings.Builder
 		c.Stdout = &stdout
 		c.Stderr = &stderr
