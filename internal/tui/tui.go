@@ -421,6 +421,13 @@ func Run(cfg config.Config, workdir, version string, extraOrch, extraExec []core
 	// capture is on so the wheel scrolls the focused tab (/mouse releases it
 	// for text selection), and the terminal's alternate-scroll translation is
 	// disabled so a released wheel can never spray arrow keys into the input.
+	// Wipe the terminal's scrollback (3J) + screen (2J) before anything draws.
+	// In full-screen mode with mouse capture off, the wheel scrolls the terminal
+	// (not cheep), so without this you'd scroll up into stale main-buffer
+	// content. Done before bubbletea enters the alt screen, so it clears the
+	// main buffer.
+	os.Stdout.WriteString("\x1b[3J\x1b[2J\x1b[H")
+
 	var opts []tea.ProgramOption
 	if !cfg.Inline {
 		opts = append(opts, tea.WithAltScreen())
@@ -501,6 +508,9 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	}
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
+	// Seed up/down input recall from prior sessions (shell-style history).
+	m.inputHist = history.LoadInputs()
+	m.histIdx = len(m.inputHist)
 	(&m).rebuild(false)
 	// Surface delegations a previous cheep process left in flight (crash/kill):
 	// any work they produced survives on quarantined worktree branches.
@@ -1435,6 +1445,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	// Record in history (skip consecutive duplicates) and reset the cursor to "new".
 	if n := len(m.inputHist); n == 0 || m.inputHist[n-1] != text {
 		m.inputHist = append(m.inputHist, text)
+		history.SaveInputs(m.inputHist) // persist for up/down recall across sessions
 	}
 	m.histIdx = len(m.inputHist)
 	m.histDraft = ""
@@ -1450,7 +1461,7 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 			m.footer = "usage: !<command>"
 			return m, nil
 		}
-		(&m).appendLine(0, hintSt.Render("🔧 "+cmdStr))
+		(&m).appendUserLine(hintSt.Render("🔧 " + cmdStr))
 		m.running = true
 		m.tabs[0].status = "run"
 		m.active = 0
@@ -1463,13 +1474,22 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	return m.sendUser(text, userLine(text, m.w))
 }
 
+// appendUserLine adds your message to the log with a blank line on each side,
+// so there's clear breathing room between the previous reply, your message, and
+// the agent's response — no separator rules.
+func (m *model) appendUserLine(display string) {
+	m.appendLine(0, "")
+	m.appendLine(0, display)
+	m.appendLine(0, "")
+}
+
 // sendUser routes a user message to the orchestrator with the usual guards
 // (no session, task already running, over budget). display is the line shown
 // in the log — for prompt templates it is the typed /name, not the expansion.
 func (m model) sendUser(text, display string) (tea.Model, tea.Cmd) {
 	if m.session == nil {
 		// Show the message and a clear, actionable error in the conversation.
-		(&m).appendLine(0, display)
+		(&m).appendUserLine(display)
 		(&m).appendLine(0, errSt.Render("✗ can't run")+hintSt.Render(" — "+errText(m.buildErr)+"  ·  fix with /config or /setup"))
 		m.active = 0
 		m.follow = true
@@ -1479,14 +1499,14 @@ func (m model) sendUser(text, display string) (tea.Model, tea.Cmd) {
 	if m.running {
 		// Queue it — it runs automatically when the current task finishes.
 		m.queue = append(m.queue, text)
-		(&m).appendLine(0, display+"  "+hintSt.Render("(queued)"))
+		(&m).appendUserLine(display + "  " + hintSt.Render("(queued)"))
 		m.active = 0
 		m.follow = true
 		(&m).syncViewport()
 		return m, nil
 	}
 	if m.overBudget() {
-		(&m).appendLine(0, display)
+		(&m).appendUserLine(display)
 		(&m).appendLine(0, errSt.Render("✗ over budget")+hintSt.Render(fmt.Sprintf(
 			" — %s of %s spent; raise or clear the cap with /budget", usd(m.spent()), usd(m.budget()))))
 		m.active, m.follow = 0, true
@@ -1511,7 +1531,7 @@ func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
 		m.suggestCancel() // free the endpoint from any in-flight suggestion call
 		m.suggestCancel = nil
 	}
-	(&m).appendLine(0, display)
+	(&m).appendUserLine(display)
 	m.tabs[0].status = "run"
 	m.active = 0
 	m.follow = true
@@ -2059,8 +2079,6 @@ func (m *model) applyEvent(e core.Event) {
 			}
 		}
 		if strings.TrimSpace(txt) != "" {
-			// Add a visual separator between user input and assistant response
-			m.appendLine(idx, sepSt.Render(strings.Repeat("─", max(1, m.w-2))))
 			for _, l := range renderMarkdown(txt, m.w) {
 				m.appendLine(idx, l)
 			}

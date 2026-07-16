@@ -61,3 +61,33 @@ func TestUniqueIDAvoidsCollision(t *testing.T) {
 		t.Errorf("UniqueID returned colliding id %s", id2)
 	}
 }
+
+func TestInputHistoryRoundTrip(t *testing.T) {
+	t.Setenv("CHEEP_HOME", t.TempDir())
+	if got := LoadInputs(); got != nil {
+		t.Fatalf("expected nil before any save, got %v", got)
+	}
+	in := []string{"first", "second", "multi\nline"}
+	SaveInputs(in)
+	got := LoadInputs()
+	if len(got) != 3 || got[0] != "first" || got[2] != "multi\nline" {
+		t.Fatalf("round-trip mismatch: %v", got)
+	}
+}
+
+func TestInputHistoryCaps(t *testing.T) {
+	t.Setenv("CHEEP_HOME", t.TempDir())
+	var many []string
+	for i := 0; i < maxInputs+50; i++ {
+		many = append(many, "cmd")
+	}
+	many[len(many)-1] = "newest"
+	SaveInputs(many)
+	got := LoadInputs()
+	if len(got) != maxInputs {
+		t.Fatalf("expected cap of %d, got %d", maxInputs, len(got))
+	}
+	if got[len(got)-1] != "newest" {
+		t.Fatalf("cap should keep the most recent entries, last = %q", got[len(got)-1])
+	}
+}

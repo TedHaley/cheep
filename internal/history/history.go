@@ -128,6 +128,50 @@ func AppendRunNote(workdir, md string) {
 	f.WriteString("\n## " + stamp + " — " + workdir + "\n\n" + strings.TrimSpace(md) + "\n")
 }
 
+// maxInputs caps the persisted input-recall history (shell-style up-arrow).
+const maxInputs = 500
+
+func inputHistPath() (string, error) {
+	d, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "input_history.json"), nil
+}
+
+// LoadInputs reads the persisted list of submitted inputs (for up/down recall
+// across sessions). Best-effort: returns nil if unreadable.
+func LoadInputs() []string {
+	p, err := inputHistPath()
+	if err != nil {
+		return nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	if json.Unmarshal(b, &out) != nil {
+		return nil
+	}
+	return out
+}
+
+// SaveInputs persists the input-recall history (most recent last), capped to
+// the last maxInputs entries. Best-effort; a write failure is ignored.
+func SaveInputs(inputs []string) {
+	if len(inputs) > maxInputs {
+		inputs = inputs[len(inputs)-maxInputs:]
+	}
+	d, err := Dir()
+	if err != nil || os.MkdirAll(d, 0o700) != nil {
+		return
+	}
+	if b, err := json.Marshal(inputs); err == nil {
+		_ = os.WriteFile(filepath.Join(d, "input_history.json"), b, 0o600)
+	}
+}
+
 // Save writes the JSON record and the Markdown transcript.
 func Save(r Record) error {
 	if len(r.Messages) == 0 {
