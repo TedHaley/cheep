@@ -2185,8 +2185,10 @@ func (m model) View() string {
 	rule := hintSt.Render(strings.Repeat("─", max(1, m.w)))
 	if m.inline {
 		// Inline chrome only: the conversation itself lives in the terminal
-		// scrollback (via tea.Println), like Claude Code.
-		parts := []string{}
+		// scrollback (via tea.Println), like Claude Code. The agent banner is
+		// pinned here in the bottom chrome (there's no top tab bar in inline
+		// mode), so it stays visible while the scrollback scrolls natively.
+		parts := []string{m.agentBar()}
 		if todos := todoHeaderLines(m.tabs[m.active].todos); len(todos) > 0 {
 			parts = append(parts, strings.Join(todos, "\n"))
 		}
@@ -2223,6 +2225,22 @@ func verb(elapsed int) string {
 // agent banner from the scrolling conversation below it.
 func (m model) bannerSep() string {
 	return sepSt.Render(strings.Repeat("─", max(1, m.w)))
+}
+
+// agentBar is the inline-mode equivalent of the top tab bar: a compact,
+// always-visible banner of the active agents (orchestrator + any executors)
+// with status glyphs. Pinned in the inline bottom chrome so it stays put while
+// the conversation scrolls in the native scrollback above.
+func (m model) agentBar() string {
+	var parts []string
+	for _, t := range m.tabs {
+		parts = append(parts, glyph(t.status)+" "+t.title)
+	}
+	bar := strings.Join(parts, hintSt.Render("  ·  "))
+	if m.w > 0 && lipgloss.Width(bar) > m.w {
+		bar = ansi.TruncateWc(bar, m.w, "…")
+	}
+	return barSt.Width(m.w).Render(bar)
 }
 
 func (m model) tabBar() string {
