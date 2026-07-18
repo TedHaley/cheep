@@ -1048,33 +1048,18 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.footer = "verifying new orchestrator " + fresh.Orchestrator.Model + " …"
 			return m, verifyConfigCmd(fresh)
 		}
-		// Backstop: the orchestrator stopped short. Nudge it to keep going —
-		// whether or not it delegated this turn (it may have done one phase
-		// and quit with more pending, or just narrated a plan without acting
-		// on it). Bounded per user message so a model that keeps stopping
+		// Backstop: the orchestrator stopped short with open todos. Nudge it to
+		// keep going — whether or not it delegated this turn (it may have done
+		// one phase and quit with more pending, or just narrated a plan without
+		// acting on it). Bounded per user message so a model that keeps stopping
 		// short can't run away.
-		//   - auto mode: only nudge when todos prove work is left (its own
-		//     contract has no other "not done yet" signal).
-		//   - loop mode: its contract is "never stop except goal-met /
-		//     plateau / budget / user" — so nudge on ANY unqualified stop,
-		//     todos or not (NUMERIC goals track progress via iterate_metric/
-		//     iterate_until, not update_todos, so openTodos may read 0 mid-goal).
-		autoUnfinished := m.mode == orchestrator.ModeAuto && m.openTodos > 0
-		loopUnfinished := m.mode == orchestrator.ModeLoop
-		if (autoUnfinished || loopUnfinished) && len(m.cfg.Executors) > 0 &&
+		if m.mode == orchestrator.ModeAuto && m.openTodos > 0 && len(m.cfg.Executors) > 0 &&
 			msg.r.Status == "completed" && m.nudges < 3 {
 			m.nudges++
 			nudge := "There are still unfinished todos. Keep going: delegate the next open " +
 				"item(s) to your executors and verify the results. Don't stop until every todo " +
 				"is done or you hit a real blocker you must tell me about — act, don't just describe."
-			hint := "finishing open todos"
-			if loopUnfinished {
-				nudge = "LOOP MODE is still on. If you already reached the goal or hit a genuine " +
-					"plateau, say so explicitly and stop. Otherwise keep iterating: measure, delegate " +
-					"the next chunk, verify — act, don't just describe what you're about to check."
-				hint = "loop mode is still on"
-			}
-			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: "+hint))
+			return m.runMessage(nudge, hintSt.Render("↻ auto-continue: finishing open todos"))
 		}
 		if len(m.queue) > 0 { // run the next queued message
 			if m.overBudget() {
@@ -1620,10 +1605,6 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	case "/auto":
 		m.mode = orchestrator.ModeAuto
 		(&m).rebuild(true)
-	case "/loop":
-		m.mode = orchestrator.ModeLoop
-		(&m).rebuild(true)
-		m.footer = "loop mode — give me a measurable goal (metric command + direction + target) and I'll iterate until it's met or progress plateaus"
 	case "/mode":
 		m.mode = orchestrator.NextMode(m.mode)
 		(&m).rebuild(true)
@@ -2364,8 +2345,6 @@ func modeLabel(mode orchestrator.Mode) string {
 		sym, color = "⏵", "244" // grey
 	case orchestrator.ModePlan:
 		sym, color = "⏸", "37" // greenish-blue
-	case orchestrator.ModeLoop:
-		sym, color = "∞", "213" // loop: magenta
 	}
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(sym + " " + string(mode))
 }

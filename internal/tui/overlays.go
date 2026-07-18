@@ -167,8 +167,7 @@ func (m model) viewHelp() string {
 	lines := []string{
 		b.Render("cheep — help"),
 		"",
-		"modes:   shift+tab cycles chat → plan → auto → loop  (or /chat /plan /auto /loop)",
-		"         loop = agree on a measurable goal, then iterate until met or plateaued.",
+		"modes:   shift+tab cycles chat → plan → auto  (or /chat /plan /auto)",
 		"         multi-agent delegation happens only in AUTO mode;",
 		"         chat = talk only, plan = read-only investigation.",
 		"glyphs:  ● running · ✓ done · ⚠ stopped early · ✗ error",

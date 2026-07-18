@@ -118,66 +118,28 @@ const (
 	ModeChat Mode = "chat" // conversation only, no tools
 	ModePlan Mode = "plan" // read-only investigation, produces a plan
 	ModeAuto Mode = "auto" // full autonomy (delegate / edit), today's behavior
-	ModeLoop Mode = "loop" // auto + plan: agree on measurable goals, then loop until met or plateaued
 )
 
 // ParseMode returns the mode for a name, or false if unknown.
 func ParseMode(s string) (Mode, bool) {
 	switch Mode(s) {
-	case ModeChat, ModePlan, ModeAuto, ModeLoop:
+	case ModeChat, ModePlan, ModeAuto:
 		return Mode(s), true
 	}
 	return "", false
 }
 
-// NextMode cycles chat → plan → auto → loop → chat.
+// NextMode cycles chat → plan → auto → chat.
 func NextMode(m Mode) Mode {
 	switch m {
 	case ModeChat:
 		return ModePlan
 	case ModePlan:
 		return ModeAuto
-	case ModeAuto:
-		return ModeLoop
 	default:
 		return ModeChat
 	}
 }
-
-// loopSystem layers the LOOP-mode protocol on top of the normal auto prompt:
-// agree on measurable goals first, then iterate toward them, stopping only on
-// goal-reached or plateau.
-const loopSystem = `
-
-LOOP MODE is ON — you work toward a GOAL, iterating until it's met or progress plateaus.
-A goal can be NUMERIC or a COVERAGE goal; pick the shape that fits and confirm it with the
-user (at most one short round of questions — propose one yourself when they're vague):
-
-  • NUMERIC — a shell command whose output is a number, a direction, and a target
-    (coverage %, test pass count, lint warnings, p95 latency, bundle bytes, ns/op).
-  • COVERAGE — "do X for every item in a set that isn't fully known up front"
-    (e.g. replicate every capability of a website, port every endpoint, cover every case).
-    Here the "metric" is items-remaining → 0. You MAINTAIN THE SET as a checklist file
-    (update_todos plus a tracked doc), because the set grows as you discover more.
-
-Protocol, in order:
-1. AGREE ON THE GOAL and its done-definition (target number, or "the checklist is empty").
-2. BASELINE. Measure / enumerate what exists before changing anything; report it.
-3. LOOP one chunk at a time:
-   • NUMERIC → prefer iterate_metric (improve→measure rounds, auto-stops on target/plateau);
-     iterate_until for plain pass/fail.
-   • COVERAGE → each round: pick the next unfinished checklist item, delegate ONE narrow
-     self-contained subtask for it (sized to the executor's context window), verify it, mark
-     it done, and re-scan for newly discovered items. Executors are fresh each subtask and
-     save their own progress, so a big set survives across many small sessions.
-4. STOP only when: the target is met / the checklist is empty, progress has PLATEAUED (two
-   consecutive rounds add nothing done and nothing new discovered), or budget/user stops you.
-   Never stop because a round "seems good" — the goal decides, not vibes.
-5. REPORT the trajectory (baseline → rounds → final), what moved it most, and — if plateaued
-   short — the bottleneck and what would unblock it.
-
-If the WORK IS IN A DIFFERENT DIRECTORY than your workspace, don't fight the sandbox — tell
-the user to run /cd <path> (or relaunch there); your file tools are scoped to the workspace.`
 
 const orchestratorSystemTmpl = `You are the orchestrator. You coordinate a fleet of cheaper
 executor agents to accomplish the user's task. You are expensive; the executors are cheap.
@@ -790,9 +752,6 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 		soloTools = append(soloTools, skillTools...)
 		soloTools = append(soloTools, project.LessonTool(workdir))
 		soloSys := soloSystem
-		if mode == ModeLoop {
-			soloSys += loopSystem
-		}
 		solo := agent.New("cheep", orchProv, cfg.Orchestrator.Model, soloSys+skillHint(skillTools)+lessonHint+liaisonRules+suggestHint(cfg)+projBlock,
 			soloTools, orchMaxTurns, 0, onEvent)
 		solo.CompactBudget = cfg.Orchestrator.ContextBudget
@@ -1337,9 +1296,6 @@ func Build(cfg config.Config, workdir string, opt Options) (*agent.Agent, error)
 	}
 
 	system := fmt.Sprintf(orchestratorSystemTmpl, roster(cfg.Executors, cfg.Budget(workdir)))
-	if mode == ModeLoop {
-		system += loopSystem
-	}
 	if isolated {
 		system += "\n\nIsolation is ON: each delegated subtask runs in its own git worktree and is " +
 			"merged back automatically. Each result has an \"integration\" field — \"merged\", " +

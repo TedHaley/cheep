@@ -21,7 +21,6 @@ var slashCmds = []slashCmd{
 	{"/chat", "talk only, no tools"},
 	{"/plan", "read-only investigation"},
 	{"/auto", "full autonomy (delegate/edit)"},
-	{"/loop", "goal loop: iterate until a metric target is met or plateaus"},
 	{"/mode", "cycle chat → plan → auto"},
 	{"/model", "show or switch the orchestrator model"},
 	{"/approval", "gate risky tool calls: yolo | auto | approve"},
