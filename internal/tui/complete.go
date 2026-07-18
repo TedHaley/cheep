@@ -45,6 +45,7 @@ var slashCmds = []slashCmd{
 	{"/stow", "sweep lessons + handoff note to disk before a reset"},
 	{"/clear", "reset the conversation"},
 	{"/prompts", "list prompt templates (invoke as /name)"},
+	{"/plugins", "install/enable optional companion plugins (e.g. hivemind)"},
 	{"/upgrade", "update cheep to the latest release"},
 	{"/help", "show help"},
 	{"/exit", "quit cheep"},

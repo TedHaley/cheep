@@ -25,6 +25,7 @@ import (
 	"github.com/TedHaley/cheep/internal/mcp"
 	"github.com/TedHaley/cheep/internal/orchestrator"
 	"github.com/TedHaley/cheep/internal/piext"
+	"github.com/TedHaley/cheep/internal/plugins"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/project"
 	"github.com/TedHaley/cheep/internal/provider"
@@ -89,6 +90,8 @@ func main() {
 		cmdJobs(os.Args[2:])
 	case "daemon":
 		cmdDaemon(os.Args[2:])
+	case "plugins", "plugin":
+		cmdPlugins(os.Args[2:])
 	case "upgrade", "update":
 		cmdUpgrade()
 	case "version", "-v", "--version":
@@ -131,6 +134,9 @@ Usage:
                                  manage recurring scheduled tasks
   cheep daemon                   run scheduled jobs on their cadence (keep it
                                  running, e.g. in tmux)
+  cheep plugins [list|install|enable|disable|remove <name>]
+                                 manage optional companion plugins (e.g.
+                                 hivemind); install fetches the binary on demand
   cheep upgrade                  update cheep to the latest release (brew or
                                  a direct binary self-replace)
   cheep version                  print the version
@@ -143,6 +149,12 @@ one or more executors. Configuration lives in a single JSON file (cheep config p
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "%scheep: %v%s\n", cRed, err, cReset)
 	os.Exit(1)
+}
+
+func must(err error) {
+	if err != nil {
+		fatal(err)
+	}
 }
 
 func ensureConfig() config.Config {
@@ -1153,6 +1165,65 @@ func cmdCheck() {
 	for _, e := range cfg.Executors {
 		fmt.Printf("Executor      %-24s ", fmt.Sprintf("%s (%s)", e.Name, e.Model))
 		ping(provider.For(e.Provider, e.Endpoint, e.APIKey, 16), e.Model)
+	}
+}
+
+func cmdPlugins(args []string) {
+	cfg := ensureConfig()
+	if len(args) == 0 || args[0] == "list" {
+		for _, p := range plugins.Registry {
+			state := "not installed"
+			switch {
+			case plugins.Active(cfg, p):
+				state = cGreen + "installed, enabled" + cReset
+			case p.Installed():
+				state = "installed, disabled"
+			}
+			fmt.Printf("%s%-12s%s %s\n    %s → %s\n", cBold, p.Name, cReset, state, p.Summary, p.Unlocks)
+		}
+		return
+	}
+	sub := args[0]
+	if len(args) < 2 {
+		fatal(fmt.Errorf("usage: cheep plugins %s <name>", sub))
+	}
+	p, ok := plugins.Find(args[1])
+	if !ok {
+		fatal(fmt.Errorf("unknown plugin %q", args[1]))
+	}
+	switch sub {
+	case "install", "add":
+		fmt.Printf("installing %s…\n", p.Name)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := p.Install(ctx); err != nil {
+			fatal(err)
+		}
+		plugins.SetEnabled(&cfg, p.Name, true)
+		if err := config.Save(cfg); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%s✓ installed & enabled %s%s\n", cGreen, p.Name, cReset)
+	case "enable", "on":
+		if !p.Installed() {
+			fatal(fmt.Errorf("%s isn't installed — run: cheep plugins install %s", p.Name, p.Name))
+		}
+		plugins.SetEnabled(&cfg, p.Name, true)
+		must(config.Save(cfg))
+		fmt.Printf("%s enabled\n", p.Name)
+	case "disable", "off":
+		plugins.SetEnabled(&cfg, p.Name, false)
+		must(config.Save(cfg))
+		fmt.Printf("%s disabled\n", p.Name)
+	case "remove", "uninstall", "rm":
+		if err := p.Remove(); err != nil {
+			fatal(err)
+		}
+		plugins.SetEnabled(&cfg, p.Name, false)
+		must(config.Save(cfg))
+		fmt.Printf("%s removed\n", p.Name)
+	default:
+		fatal(fmt.Errorf("usage: cheep plugins <list|install|enable|disable|remove> [name]"))
 	}
 }
 

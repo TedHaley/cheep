@@ -109,6 +109,11 @@ type Config struct {
 	MCP          map[string]mcp.Server `json:"mcp,omitempty"` // name -> MCP server
 	KeepTabs     bool                  `json:"keep_tabs,omitempty"`
 
+	// Plugins records which optional companion-binary plugins are enabled, keyed
+	// by plugin name (see internal/plugins). Install state is derived from disk;
+	// this only tracks the enable/disable choice.
+	Plugins map[string]bool `json:"plugins,omitempty"`
+
 	// MouseOff releases mouse capture in the full-screen UI so terminal-native
 	// text selection works (scroll with PgUp/PgDn). Default: capture on, the
 	// wheel scrolls the focused tab. Toggle live (and persist) with /mouse.

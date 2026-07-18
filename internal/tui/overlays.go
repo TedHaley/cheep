@@ -200,6 +200,7 @@ func (m model) viewHelp() string {
 		"  /approval        gate risky tool calls: yolo | auto | approve",
 		"  /nomistakes      strictest safety: gates everything, merges need your sign-off",
 		"  /clear           reset the conversation",
+		"  /plugins         install/enable optional companion plugins (hivemind, …)",
 		"  /upgrade         update cheep to the latest release",
 		"  /help            this panel        /exit  quit",
 		"",

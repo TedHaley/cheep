@@ -97,6 +97,39 @@ func Upgrade(ctx context.Context, to string) (Result, error) {
 	return Result{Via: "binary"}, nil
 }
 
+// FetchBinary downloads `binary` out of the latest release's `archive` asset,
+// verifying the archive's sha256 against the release checksums first. Used by the
+// plugin installer to fetch companion binaries (e.g. cheep-hivemind) on demand.
+func FetchBinary(ctx context.Context, archive, binary string) ([]byte, error) {
+	rel, err := Latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sums, err := download(ctx, releaseURL(rel.Version, "checksums.txt"))
+	if err != nil {
+		return nil, fmt.Errorf("fetch checksums: %w", err)
+	}
+	want, ok := pickChecksum(string(sums), archive)
+	if !ok {
+		return nil, fmt.Errorf("no checksum for %s in release %s (not published yet?)", archive, rel.Version)
+	}
+	data, err := download(ctx, releaseURL(rel.Version, archive))
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", archive, err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != want {
+		return nil, fmt.Errorf("checksum mismatch for %s", archive)
+	}
+	bins, err := extractBinaries(data, binary)
+	if err != nil {
+		return nil, fmt.Errorf("extract %s: %w", archive, err)
+	}
+	if bins[binary] == nil {
+		return nil, fmt.Errorf("%s not found inside %s", binary, archive)
+	}
+	return bins[binary], nil
+}
+
 // --- Homebrew ---------------------------------------------------------------
 
 func viaHomebrew(exe string) bool {

@@ -39,6 +39,7 @@ import (
 	"github.com/TedHaley/cheep/internal/inflight"
 	"github.com/TedHaley/cheep/internal/jobs"
 	"github.com/TedHaley/cheep/internal/orchestrator"
+	"github.com/TedHaley/cheep/internal/plugins"
 	"github.com/TedHaley/cheep/internal/pricing"
 	"github.com/TedHaley/cheep/internal/prompts"
 	"github.com/TedHaley/cheep/internal/provider"
@@ -757,6 +758,21 @@ func upgradeCmd() tea.Cmd {
 	}
 }
 
+// pluginInstalledMsg reports the result of an on-demand plugin install.
+type pluginInstalledMsg struct {
+	name string
+	err  error
+}
+
+// pluginInstallCmd downloads a plugin's companion binary off the UI goroutine.
+func pluginInstallCmd(p plugins.Plugin) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		return pluginInstalledMsg{name: p.Name, err: p.Install(ctx)}
+	}
+}
+
 type probeMsg map[string]string
 
 // probeCmd pings every configured agent so the banner can show connectivity.
@@ -1183,6 +1199,16 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sp, cmd = m.sp.Update(msg)
 		return m, cmd
 
+	case pluginInstalledMsg:
+		if msg.err != nil {
+			m.footer = "install failed: " + errText(msg.err)
+			return m, nil
+		}
+		plugins.SetEnabled(&m.cfg, msg.name, true) // installed → enable by default
+		_ = config.Save(m.cfg)
+		m.footer = "✓ installed & enabled " + msg.name + " — restart cheep to activate it"
+		return m, nil
+
 	case updateAvailableMsg:
 		m.updateVer = msg.latest
 		m.footer = "cheep " + msg.latest + " is available — /upgrade to install"
@@ -1464,6 +1490,71 @@ func (m *model) historyNext() {
 		m.input.SetValue(m.inputHist[m.histIdx])
 	}
 	m.input.CursorEnd()
+}
+
+// plugins handles /plugins: list, install, enable, disable, remove. Install
+// downloads the companion binary on demand; enable/disable persist to config.
+func (m model) plugins(f []string) (tea.Model, tea.Cmd) {
+	if len(f) < 2 { // bare /plugins — list catalog + state
+		m.appendLine(m.active, hintSt.Render("plugins — optional companion capabilities (install-on-demand):"))
+		for _, p := range plugins.Registry {
+			state := hintSt.Render("not installed")
+			switch {
+			case plugins.Active(m.cfg, p):
+				state = okSt.Render("● installed · enabled")
+			case p.Installed():
+				state = hintSt.Render("installed · disabled")
+			}
+			m.appendLine(m.active, "  "+userSt.Render(p.Name)+"  "+state)
+			m.appendLine(m.active, hintSt.Render("     "+p.Summary+" → unlocks "+p.Unlocks))
+		}
+		m.appendLine(m.active, hintSt.Render("/plugins install <name> · enable <name> · disable <name> · remove <name>"))
+		m.follow = true
+		(&m).syncViewport()
+		return m, nil
+	}
+	sub := f[1]
+	if len(f) < 3 {
+		m.footer = "usage: /plugins " + sub + " <name>"
+		return m, nil
+	}
+	p, ok := plugins.Find(f[2])
+	if !ok {
+		m.footer = "unknown plugin: " + f[2]
+		return m, nil
+	}
+	switch sub {
+	case "install", "add":
+		if p.Installed() {
+			m.footer = p.Name + " is already installed"
+			return m, nil
+		}
+		m.footer = "installing " + p.Name + "…"
+		return m, pluginInstallCmd(p)
+	case "enable", "on":
+		if !p.Installed() {
+			m.footer = p.Name + " isn't installed — /plugins install " + p.Name
+			return m, nil
+		}
+		plugins.SetEnabled(&m.cfg, p.Name, true)
+		_ = config.Save(m.cfg)
+		m.footer = p.Name + " enabled — restart cheep to activate"
+	case "disable", "off":
+		plugins.SetEnabled(&m.cfg, p.Name, false)
+		_ = config.Save(m.cfg)
+		m.footer = p.Name + " disabled — restart cheep to deactivate"
+	case "remove", "uninstall", "rm":
+		if err := p.Remove(); err != nil {
+			m.footer = "remove failed: " + errText(err)
+			return m, nil
+		}
+		plugins.SetEnabled(&m.cfg, p.Name, false)
+		_ = config.Save(m.cfg)
+		m.footer = p.Name + " removed"
+	default:
+		m.footer = "usage: /plugins install|enable|disable|remove <name>"
+	}
+	return m, nil
 }
 
 func (m model) submit() (tea.Model, tea.Cmd) {
@@ -1849,6 +1940,8 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 	case "/upgrade", "/update":
 		m.footer = "checking for updates…"
 		return m, upgradeCmd()
+	case "/plugins", "/plugin":
+		return m.plugins(strings.Fields(text))
 	case "/status":
 		for _, l := range statusLines(m.cfg) {
 			m.appendLine(m.active, l)
