@@ -104,6 +104,12 @@ type model struct {
 	footer    string
 	updateVer string // newer release the launch check found ("" if none/current)
 
+	// In-app text selection over the conversation viewport (full-screen mode,
+	// mouse captured). Rows are viewport-relative (0 = first visible line).
+	selecting bool
+	selY0     int
+	selY1     int
+
 	lastKeyAt time.Time // previous keypress time — sub-10ms Enters are paste bursts, not submits
 
 	inputHist []string // submitted inputs, for up/down recall
@@ -186,6 +192,7 @@ var (
 	todoDoneSt = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	todoProgSt = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
 	sepSt      = lipgloss.NewStyle().Foreground(lipgloss.Color("238")) // dim gray for separator
+	selHiSt    = lipgloss.NewStyle().Reverse(true)                     // click-drag selection highlight
 )
 
 // userLine renders a user message for the log, wrapped to the window width —
@@ -508,9 +515,6 @@ func newModel(cfg config.Config, workdir string, events chan core.Event, extraOr
 	}
 	m.histStarted = time.Now()
 	m.histID = history.NewID(m.histStarted)
-	// Seed up/down input recall from prior sessions (shell-style history).
-	m.inputHist = history.LoadInputs()
-	m.histIdx = len(m.inputHist)
 	(&m).rebuild(false)
 	// Surface delegations a previous cheep process left in flight (crash/kill):
 	// any work they produced survives on quarantined worktree branches.
@@ -1398,8 +1402,48 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ovVP, _ = m.ovVP.Update(msg)
 			return m, nil
 		}
-		m.vp, _ = m.vp.Update(msg)
-		m.follow = m.vp.AtBottom()
+		// Wheel scrolls the conversation (and cancels any in-progress selection).
+		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+			m.selecting = false
+			m.vp, _ = m.vp.Update(msg)
+			m.follow = m.vp.AtBottom()
+			return m, nil
+		}
+		// In-app click-drag text selection over the conversation viewport, so you
+		// can select+copy with a plain drag even though the app captures the mouse
+		// (full-screen only; inline mode uses the terminal's native selection).
+		if !m.inline {
+			const vpTop = 2 // tab bar + separator rule sit above the viewport
+			row := msg.Y - vpTop
+			inVP := row >= 0 && row < m.vp.Height
+			switch msg.Action {
+			case tea.MouseActionPress:
+				if msg.Button == tea.MouseButtonLeft && inVP {
+					m.selecting = true
+					m.selY0, m.selY1 = row, row
+				}
+			case tea.MouseActionMotion:
+				if m.selecting {
+					m.selY1 = max(0, min(row, m.vp.Height-1))
+				}
+			case tea.MouseActionRelease:
+				if m.selecting {
+					m.selecting = false
+					if txt := m.selectedText(); strings.TrimSpace(txt) != "" {
+						if err := clipboardCopy(txt); err == nil {
+							n := strings.Count(txt, "\n") + 1
+							unit := "lines"
+							if n == 1 {
+								unit = "line"
+							}
+							m.footer = fmt.Sprintf("✓ copied %d %s", n, unit)
+						} else {
+							m.footer = "copy failed: " + err.Error()
+						}
+					}
+				}
+			}
+		}
 		return m, nil
 	}
 
@@ -1442,10 +1486,10 @@ func (m model) submit() (tea.Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
-	// Record in history (skip consecutive duplicates) and reset the cursor to "new".
+	// Record for ↑/↓ recall this session (skip consecutive duplicates) and reset
+	// the cursor to "new".
 	if n := len(m.inputHist); n == 0 || m.inputHist[n-1] != text {
 		m.inputHist = append(m.inputHist, text)
-		history.SaveInputs(m.inputHist) // persist for up/down recall across sessions
 	}
 	m.histIdx = len(m.inputHist)
 	m.histDraft = ""
@@ -2206,7 +2250,7 @@ func (m model) View() string {
 	// The tab bar is a fixed banner pinned to the top; the log scrolls beneath
 	// it and never covers it. belowViewport supplies the sticky panels and the
 	// input box (hidden on read-only executor tabs).
-	parts := []string{m.tabBar(), m.bannerSep(), m.vp.View()}
+	parts := []string{m.tabBar(), m.bannerSep(), m.highlightSelection(m.vp.View())}
 	parts = append(parts, m.belowViewport()...)
 	parts = append(parts, hint)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -2225,6 +2269,45 @@ func verb(elapsed int) string {
 // agent banner from the scrolling conversation below it.
 func (m model) bannerSep() string {
 	return sepSt.Render(strings.Repeat("─", max(1, m.w)))
+}
+
+// selRange returns the ordered [lo, hi] viewport rows of the current selection.
+func (m model) selRange() (int, int) {
+	if m.selY0 <= m.selY1 {
+		return m.selY0, m.selY1
+	}
+	return m.selY1, m.selY0
+}
+
+// selectedText returns the plain text of the current viewport selection — the
+// visible lines between the drag anchor and head, ANSI stripped. Line-level for
+// now (a whole visible row at a time); char-level ranges are a later refinement.
+func (m model) selectedText() string {
+	lines := strings.Split(m.vp.View(), "\n")
+	lo, hi := m.selRange()
+	var out []string
+	for i := lo; i <= hi && i < len(lines); i++ {
+		if i >= 0 {
+			out = append(out, strings.TrimRight(ansi.Strip(lines[i]), " "))
+		}
+	}
+	return strings.TrimRight(strings.Join(out, "\n"), "\n")
+}
+
+// highlightSelection reverse-videos the selected rows in a rendered viewport
+// so the drag is visible.
+func (m model) highlightSelection(vpview string) string {
+	if !m.selecting {
+		return vpview
+	}
+	lines := strings.Split(vpview, "\n")
+	lo, hi := m.selRange()
+	for i := lo; i <= hi && i < len(lines); i++ {
+		if i >= 0 {
+			lines[i] = selHiSt.Render(ansi.Strip(lines[i]))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // agentBar is the inline-mode equivalent of the top tab bar: a compact,
