@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/TedHaley/cheep/internal/capabilities"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/core"
 )
@@ -186,6 +187,31 @@ func TestUserLineBlock(t *testing.T) {
 		if got := lipgloss.Width(l); got != 78 {
 			t.Fatalf("each row should pad to a uniform 78-col block, got %d: %q", got, l)
 		}
+	}
+}
+
+// TestAutoImproveToggleAndInstall: /autoimprove toggles the setting, and
+// installing a pending capability adds its MCP to the config.
+func TestAutoImproveToggleAndInstall(t *testing.T) {
+	m := testModel(t)
+	if m.cfg.AutoImproveOff {
+		t.Fatal("auto-improve should default ON")
+	}
+	nm, _ := m.slash("/autoimprove off")
+	m = nm.(model)
+	if !m.cfg.AutoImproveOff {
+		t.Fatal("/autoimprove off should disable it")
+	}
+
+	// A pending suggestion, installed via /autoimprove install, lands in config.MCP.
+	m.pendingCap = capabilities.Catalog[0]
+	nm, _ = m.slash("/autoimprove install")
+	m = nm.(model)
+	if !capabilities.Installed(m.cfg, capabilities.Catalog[0].Name) {
+		t.Fatalf("install should add %q to config.MCP", capabilities.Catalog[0].Name)
+	}
+	if m.pendingCap.Name != "" {
+		t.Fatal("pending capability should clear after install")
 	}
 }
 

@@ -114,6 +114,13 @@ type Config struct {
 	// this only tracks the enable/disable choice.
 	Plugins map[string]bool `json:"plugins,omitempty"`
 
+	// AutoImproveOff disables auto-improve (default: on). When on, cheep watches
+	// for an agent struggling for lack of a tool and offers to install a curated
+	// MCP capability (see internal/capabilities). AutoImproveSilent installs the
+	// suggestion without asking first (default: ask, since it runs 3rd-party code).
+	AutoImproveOff    bool `json:"auto_improve_off,omitempty"`
+	AutoImproveSilent bool `json:"auto_improve_silent,omitempty"`
+
 	// MouseOff releases mouse capture in the full-screen UI so terminal-native
 	// text selection works (scroll with PgUp/PgDn). Default: capture on, the
 	// wheel scrolls the focused tab. Toggle live (and persist) with /mouse.

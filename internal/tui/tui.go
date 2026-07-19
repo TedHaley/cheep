@@ -32,6 +32,7 @@ import (
 
 	"github.com/TedHaley/cheep/internal/agent"
 	"github.com/TedHaley/cheep/internal/approve"
+	"github.com/TedHaley/cheep/internal/capabilities"
 	"github.com/TedHaley/cheep/internal/config"
 	"github.com/TedHaley/cheep/internal/configassist"
 	"github.com/TedHaley/cheep/internal/core"
@@ -110,6 +111,11 @@ type model struct {
 	selecting bool
 	selY0     int
 	selY1     int
+
+	// auto-improve: the last user task (for gap detection) and a capability the
+	// detector suggested that's awaiting /autoimprove install.
+	lastTask   string
+	pendingCap capabilities.Capability
 
 	lastKeyAt time.Time // previous keypress time — sub-10ms Enters are paste bursts, not submits
 
@@ -758,6 +764,49 @@ func upgradeCmd() tea.Cmd {
 	}
 }
 
+// improveSuggestMsg carries an auto-improve capability suggestion from the
+// post-turn gap detector.
+type improveSuggestMsg struct {
+	cap capabilities.Capability
+	ok  bool
+}
+
+// detectImproveCmd runs the auto-improve gap detector on the cheapest agent after
+// a turn: does the just-finished task look like it lacked a curated tool?
+func (m model) detectImproveCmd(task, result string) tea.Cmd {
+	if m.cfg.AutoImproveOff || strings.TrimSpace(result) == "" {
+		return nil
+	}
+	a := m.cfg.Orchestrator // cheapest agent, preferring free/local
+	for _, e := range m.cfg.Executors {
+		if pricing.Score(e) < pricing.Score(a) {
+			a = e
+		}
+	}
+	prov := provider.For(a.Provider, a.Endpoint, a.APIKey, 256)
+	model, cfg := a.Model, m.cfg
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cap, ok := capabilities.Detect(ctx, prov, model, task, result, cfg)
+		return improveSuggestMsg{cap: cap, ok: ok}
+	}
+}
+
+// installCapability adds a curated MCP capability to the config; it activates on
+// the next launch (mid-session MCP start is a later refinement).
+func (m model) installCapability(c capabilities.Capability) (tea.Model, tea.Cmd) {
+	capabilities.Install(&m.cfg, c)
+	_ = config.Save(m.cfg)
+	m.pendingCap = capabilities.Capability{}
+	note := "✓ added capability: " + c.Name + " — restart cheep to activate it"
+	if len(c.NeedsEnv) > 0 {
+		note += " (set " + strings.Join(c.NeedsEnv, ", ") + " first)"
+	}
+	m.footer = note
+	return m, nil
+}
+
 // pluginInstalledMsg reports the result of an on-demand plugin install.
 type pluginInstalledMsg struct {
 	name string
@@ -1101,6 +1150,12 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, sc)
 			}
 		}
+		// auto-improve: check whether this turn struggled for lack of a tool.
+		if !m.cfg.AutoImproveOff && m.pendingCap.Name == "" {
+			if dc := m.detectImproveCmd(m.lastTask, msg.r.Output); dc != nil {
+				cmds = append(cmds, dc)
+			}
+		}
 		return m, tea.Batch(cmds...)
 
 	case suggestionsMsg:
@@ -1198,6 +1253,21 @@ func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
 		return m, cmd
+
+	case improveSuggestMsg:
+		if !msg.ok || m.running || capabilities.Installed(m.cfg, msg.cap.Name) {
+			return m, nil
+		}
+		if m.cfg.AutoImproveSilent {
+			return m.installCapability(msg.cap)
+		}
+		m.pendingCap = msg.cap
+		note := "🔧 auto-improve: " + msg.cap.Name + " would help here — /autoimprove install to add it"
+		if len(msg.cap.NeedsEnv) > 0 {
+			note += " (needs " + strings.Join(msg.cap.NeedsEnv, ", ") + ")"
+		}
+		m.footer = note
+		return m, nil
 
 	case pluginInstalledMsg:
 		if msg.err != nil {
@@ -1557,6 +1627,51 @@ func (m model) plugins(f []string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// autoImprove handles /autoimprove: toggle on/off, silent-install, or install
+// the pending suggestion.
+func (m model) autoImprove(f []string) (tea.Model, tea.Cmd) {
+	if len(f) < 2 {
+		state := "ON"
+		if m.cfg.AutoImproveOff {
+			state = "OFF"
+		}
+		if m.pendingCap.Name != "" {
+			m.footer = "pending: " + m.pendingCap.Name + " — /autoimprove install to add it"
+			return m, nil
+		}
+		m.footer = "auto-improve is " + state + " — /autoimprove on|off · silent on|off · install"
+		return m, nil
+	}
+	switch f[1] {
+	case "on":
+		m.cfg.AutoImproveOff = false
+		_ = config.Save(m.cfg)
+		m.footer = "auto-improve ON — I'll suggest tools when an agent struggles"
+	case "off":
+		m.cfg.AutoImproveOff = true
+		_ = config.Save(m.cfg)
+		m.footer = "auto-improve OFF"
+	case "silent":
+		on := len(f) > 2 && (f[2] == "on" || f[2] == "true" || f[2] == "yes")
+		m.cfg.AutoImproveSilent = on
+		_ = config.Save(m.cfg)
+		if on {
+			m.footer = "auto-improve will now install suggestions automatically (curated catalog only)"
+		} else {
+			m.footer = "auto-improve will ask before installing"
+		}
+	case "install":
+		if m.pendingCap.Name == "" {
+			m.footer = "nothing pending to install"
+			return m, nil
+		}
+		return m.installCapability(m.pendingCap)
+	default:
+		m.footer = "usage: /autoimprove on|off | silent on|off | install"
+	}
+	return m, nil
+}
+
 func (m model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
@@ -1645,6 +1760,7 @@ func (m model) startTask(text string) (tea.Model, tea.Cmd) {
 
 // runMessage sends text to the orchestrator, showing `display` in the log.
 func (m model) runMessage(text, display string) (tea.Model, tea.Cmd) {
+	m.lastTask = text   // for auto-improve gap detection at turn-end
 	m.suggestions = nil // last turn's suggestions are stale once we act
 	m.refreshPlaceholder()
 	if m.suggestCancel != nil {
@@ -1942,6 +2058,8 @@ func (m model) slash(text string) (tea.Model, tea.Cmd) {
 		return m, upgradeCmd()
 	case "/plugins", "/plugin":
 		return m.plugins(strings.Fields(text))
+	case "/autoimprove", "/improve":
+		return m.autoImprove(strings.Fields(text))
 	case "/status":
 		for _, l := range statusLines(m.cfg) {
 			m.appendLine(m.active, l)

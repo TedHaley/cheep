@@ -201,6 +201,7 @@ func (m model) viewHelp() string {
 		"  /nomistakes      strictest safety: gates everything, merges need your sign-off",
 		"  /clear           reset the conversation",
 		"  /plugins         install/enable optional companion plugins (hivemind, …)",
+		"  /autoimprove     on by default: suggests MCP tools when an agent struggles",
 		"  /upgrade         update cheep to the latest release",
 		"  /help            this panel        /exit  quit",
 		"",

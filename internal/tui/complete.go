@@ -46,6 +46,7 @@ var slashCmds = []slashCmd{
 	{"/clear", "reset the conversation"},
 	{"/prompts", "list prompt templates (invoke as /name)"},
 	{"/plugins", "install/enable optional companion plugins (e.g. hivemind)"},
+	{"/autoimprove", "auto-suggest MCP tools when an agent struggles (on by default)"},
 	{"/upgrade", "update cheep to the latest release"},
 	{"/help", "show help"},
 	{"/exit", "quit cheep"},
